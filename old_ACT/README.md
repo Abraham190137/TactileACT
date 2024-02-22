@@ -19,6 +19,7 @@ This repo is a fork of ACT (https://github.com/tonyzhaozh/act).
     conda activate TactileACT
     pip install torchvision
     pip install torch
+    pip install pyquaternion
     pip install pyyaml
     pip install pexpect
     pip install opencv-python
@@ -28,7 +29,6 @@ This repo is a fork of ACT (https://github.com/tonyzhaozh/act).
     pip install h5py
     pip install ipython
     pip install tqdm
-    pip install opencv-python
     cd detr && pip install -e .
 
 ### Example Usages

@@ -1,3 +1,9 @@
+data/
+clip_graphs/
+clip_models/
+visualizations/
+*.h5py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -5,8 +5,7 @@ import h5py
 import argparse
 
 import matplotlib.pyplot as plt
-
-DT = 0.01
+from constants import DT
 
 import IPython
 e = IPython.embed
