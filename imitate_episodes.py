@@ -79,6 +79,11 @@ def main(args):
     is_sim: bool = meta_data['is_sim']
     state_dim:int = meta_data['state_dim']
 
+    norm_stats = get_norm_stats(dataset_dir, num_episodes)
+
+    # save norm stats to args. Need to convert from numpy to list
+    args['norm_stats'] = {k: v.tolist() for k, v in norm_stats.items()}
+
     set_seed(1)
     if gpu != -1: # -1 == No GPU Specified
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
@@ -198,7 +203,6 @@ def main(args):
 
     # save dataset stats
     # obtain normalization stats for qpos and action
-    norm_stats = get_norm_stats(dataset_dir, num_episodes)
     stats_path = os.path.join(ckpt_dir, f'dataset_stats.pkl')
     with open(stats_path, 'wb') as f:
         pickle.dump(norm_stats, f)
