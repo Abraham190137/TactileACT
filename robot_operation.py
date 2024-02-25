@@ -185,7 +185,32 @@ if __name__ == '__main__':
     weight_kernal = np.stack([weight_kernal]*4, axis=1)
     print("weight_kernal", weight_kernal.shape, weight_kernal)
 
+    # # pretend to be a robot by loading a dataset
+    # data_dir = "//home/aigeorge/research/TactileACT/data/original/camara_cage_1/run_0/episode_3/episode_3.hdf5"
+    # with h5py.File(data_dir, 'r') as root:
+    #     qpos = root['/observations/position'][()]
+    #     gt_actions = root['/goal_position'][()]
+    #     all_gelsight_data = root['observations/gelsight/depth_strain_image'][()]
+    #     num_episodes = root.attrs['num_timesteps']
+
+    #     all_images = {}
+    #     for cam in root.attrs['camera_names']:
+    #         video_images = []
+    #         video_path = os.path.join(os.path.dirname(data_dir), f'cam-{cam}.avi')
+    #         cap = cv2.VideoCapture(video_path)
+    #         for i in range(num_episodes):
+    #             ret, frame = cap.read()
+    #             if not ret:
+    #                 break
+    #             video_images.append(frame)
+            
+    #         all_images[cam] = np.array(video_images)
+    #         cap.release()
+
     for i in range(num_episodes):
+        # images = {key: all_images[key][i] for key in all_images}
+        # gelsight_data = all_gelsight_data[i]
+
         images = cameras.get_next_frames()
         frame, marker_data, depth, strain_x, strain_y = gelsight.get_next_frame()
 
@@ -199,7 +224,8 @@ if __name__ == '__main__':
         qpos[:3] = current_pose.translation
         qpos[3] = finger_width
         print("qpos", qpos)
-        image_data, qpos_data = preprocess.process_data(images, np.stack([depth, strain_x, strain_y], axis=-1), qpos)
+        gelsight_data = np.stack([depth, strain_x, strain_y], axis=-1)
+        image_data, qpos_data = preprocess.process_data(images, gelsight_data, qpos)
 
         # get the action from the model
         qpos_data = qpos_data.to(device)
