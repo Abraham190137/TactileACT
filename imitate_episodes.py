@@ -9,7 +9,7 @@ from copy import deepcopy
 from tqdm import tqdm
 from einops import rearrange
 
-from utils import get_norm_stats, EpisodicDataset # data functions
+from utils import get_norm_stats, EpisodicDataset, EpisodicDatasetDelta # data functions
 from utils import compute_dict_mean, set_seed, detach_dict # helper functions
 from policy_action_distribution import ACTPolicy
 from policy_cnnmlp_distribution import CNNMLPPolicy
@@ -79,7 +79,7 @@ def main(args):
     is_sim: bool = meta_data['is_sim']
     state_dim:int = meta_data['state_dim']
 
-    norm_stats = get_norm_stats(dataset_dir, num_episodes)
+    norm_stats = get_norm_stats(dataset_dir, num_episodes, chunk_size=chunk_size)
 
     # save norm stats to args. Need to convert from numpy to list
     args['norm_stats'] = {k: v.tolist() for k, v in norm_stats.items()}
@@ -208,13 +208,12 @@ def main(args):
         pickle.dump(norm_stats, f)
 
     # construct dataset and dataloader
-    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, chunk_size=chunk_size)
-    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, chunk_size=chunk_size)
+    train_dataset = EpisodicDatasetDelta(train_indices, dataset_dir, camera_names, norm_stats, chunk_size=chunk_size)
+    val_dataset = EpisodicDatasetDelta(val_indices, dataset_dir, camera_names, norm_stats, chunk_size=chunk_size)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
 
-    debug.mean = train_dataset.mean
-    debug.std = train_dataset.std
+    debug.action_qpos_normalizer = train_dataset.action_qpos_normalize
 
     best_ckpt_info = train_bc(policy=policy,
                               train_dataloader=train_dataloader,

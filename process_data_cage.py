@@ -7,10 +7,10 @@ from matplotlib import pyplot as plt
 from typing import List, Dict
 from multiprocessing import Pool
 import json
-from utils import get_norm_stats
+from utils import gelsight_norm_stats
 
 CROP_PARAMS = {
-    1: {'i': 0, 'j': 624, 'h': 1080, 'w': 1296, 'size': (1080, 1920)},
+    1: {'i': 0, 'j': 312, 'h': 1080, 'w': 1296, 'size': (1080, 1920)},
     2: {'i': 108, 'j': 775, 'h': 755, 'w': 906, 'size': (1080, 1920)},
     3: {'i': 324, 'j': 768, 'h': 595, 'w': 714, 'size': (1080, 1920)},
     4: {'i': 360, 'j': 648, 'h': 560, 'w': 672, 'size': (1080, 1920)},
@@ -217,13 +217,14 @@ def uncompress_data(source_folder, save_path, image_size = [400, 480], masks: Di
         
 
             
-def process_folder(source_folder, save_folder, image_size = [400, 480], masks = {}):
-    # find all the episodes in the source folder recursively
+def process_folder(source_folders, save_folder, image_size = [400, 480], masks = {}):
+    # find all the episodes in the source folders recursively
     h5py_files = []
-    for root, dirs, files in os.walk(source_folder):
-        for file in files:
-            if file.endswith('.hdf5'):
-                h5py_files.append(os.path.join(root, file))
+    for source_folder in source_folders:
+        for root, dirs, files in os.walk(source_folder):
+            for file in files:
+                if file.endswith('.hdf5'):
+                    h5py_files.append(os.path.join(root, file))
 
     save_paths = []
     episode_folders = []
@@ -248,11 +249,10 @@ def save_norm_stats(save_folder):
     num_episodes = len(h5py_files)
 
     # get norm stats and save them
-    stats = get_norm_stats(save_folder, num_episodes, use_existing=False)
+    gelsight_mean, gelsight_std = gelsight_norm_stats(save_folder, num_episodes)
     # convert form numpy to list for json serialization
-    for key in stats:
-        stats[key] = stats[key].tolist()
-    with open(os.path.join(save_folder, 'norm_stats.json'), 'w') as f:
+    stats = {'gelsight_mean': gelsight_mean.tolist(), 'gelsight_std': gelsight_std.tolist()}
+    with open(os.path.join(save_folder, 'gelsight_norm_stats.json'), 'w') as f:
         json.dump(stats, f)
 
             
@@ -260,12 +260,16 @@ if __name__ == "__main__":
     image_size = [400, 480]
     masks = make_masks(image_size, MASK_VERTICIES)
 
-    source_folder = '/home/aigeorge/research/TactileACT/data/original/camara_cage_1/'
-    save_folder = '/home/aigeorge/research/TactileACT/data/camera_cage/data'
+    source_folders = ['/home/aigeorge/research/TactileACT/data/original/camara_cage_2_new_mount/',
+                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_3/',
+                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_5_crack_gel/',
+                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_6_new_gel/']
+    
+    save_folder = '/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data'
 
-    process_folder(source_folder, save_folder, image_size, masks)
+    # process_folder(source_folders, save_folder, image_size, masks)
 
-    # save_norm_stats(save_folder)
+    save_norm_stats(save_folder)
 
     # source_file = '/home/aigeorge/research/TactileACT/data/original/camara_cage_1/run_0/episode_3'
     # save_file = '/home/aigeorge/research/TactileACT/test.hdf5'
