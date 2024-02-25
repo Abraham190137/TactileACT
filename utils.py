@@ -138,6 +138,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
                     # resize image
                     if self.image_size != image.shape[:2]:
                         print('reshaping image')
+                        raise ValueError('Image size does not match the specified image size')
                         image = cv2.resize(image, (self.image_size[1], self.image_size[0]))
 
                     # normalize image
