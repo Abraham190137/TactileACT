@@ -11,8 +11,7 @@ class DebugController:
         self.batch = batch
         self.dataset = dataset
         self._visualizations_dir = visualizations_dir
-        self.std = None
-        self.mean = None
+        self.action_qpos_normalizer = None
 
     @property
     def visualizations_dir(self):
@@ -140,7 +139,7 @@ def z_slider(policy, post_process, qpos, image, processed_image, z_min=-3, z_max
     plt.show()
     return keep_going[0]
 
-def visualize_data(image_data, qpos_data, action_data, is_pad_data, output_data=None):
+def visualize_data(image_data, qpos_data, action_pred_data, is_pad_data, action_gt_data=None):
     global debug
     if not debug.plot:
         return
@@ -149,17 +148,16 @@ def visualize_data(image_data, qpos_data, action_data, is_pad_data, output_data=
     import numpy as np
 
     images = [img.clone().detach().cpu().numpy() for img in image_data]
-    qpos = qpos_data.clone().detach().cpu().numpy()
-    actions = action_data.clone().detach().cpu().numpy()
+    qpos_norm = qpos_data.clone().detach().cpu().numpy()
+    actions_pred = action_pred_data.clone().detach().cpu().numpy()
     is_pad = is_pad_data.clone().detach().cpu().numpy()
 
     # unnormlize actions and qpos
-    actions = actions * debug.std + debug.mean
-    qpos = qpos * debug.std + debug.mean
+    qpos, actions_pred = debug.action_qpos_normalizer.unnormalize(qpos_norm, actions_pred)
 
-    if output_data is not None:
-        output = output_data.clone().detach().cpu().numpy()
-        output = output * debug.std + debug.mean
+    if action_gt_data is not None:
+        actions_gt = action_gt_data.clone().detach().cpu().numpy()
+        _, actions_gt = debug.action_qpos_normalizer.unnormalize(qpos_norm, actions_gt)
 
     # Create a figure and axes
     fig = plt.figure(figsize=(10, 10), layout='tight')
@@ -170,13 +168,13 @@ def visualize_data(image_data, qpos_data, action_data, is_pad_data, output_data=
         axs_left[i].imshow(image.transpose(1, 2, 0))     
 
     # Make a 3D scatter plot of the actions in the right subplot. Use cmaps to color the points based on the index
-    c = np.arange(len(actions))
+    c = np.arange(len(actions_pred))
     ax2 = subfigs[1].add_subplot(111, projection='3d')
     # ax2.scatter(actions[:, 0], actions[:, 1], actions[:, 2], c='b', marker='o')
-    sc = ax2.scatter(actions[:, 0], actions[:, 1], actions[:, 2], c=c, cmap='viridis', marker='o')
-    if output_data is not None:
+    sc = ax2.scatter(actions_pred[:, 0], actions_pred[:, 1], actions_pred[:, 2], c=c, cmap='viridis', marker='x')
+    if action_gt_data is not None:
         # ax2.scatter(output[:, 0], output[:, 1], output[:, 2], c='g', marker='x')
-        ax2.scatter(output[:, 0], output[:, 1], output[:, 2], c=c, cmap = 'viridis', marker='x')
+        ax2.scatter(actions_gt[:, 0], actions_gt[:, 1], actions_gt[:, 2], c=c, cmap = 'viridis', marker='o')
     ax2.scatter(qpos[0], qpos[1], qpos[2], c='r', marker='o')
     ax2.set_xlabel('X')
     ax2.set_ylabel('Y')

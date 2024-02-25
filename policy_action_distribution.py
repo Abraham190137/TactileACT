@@ -137,20 +137,19 @@ class ACTPolicy(nn.Module):
         self.kl_weight = kl_weight
         print(f'KL Weight {self.kl_weight}')
 
-    def __call__(self, qpos, images, actions=None, is_pad=None, z=None, ignore_latent=False):
+    def __call__(self, qpos:torch.Tensor, images, actions=None, is_pad=None, z=None, ignore_latent=False):
         global debug
         env_state = None
         # move normalize to dataloader
         # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
         #                                  std=[0.229, 0.224, 0.225])
-        # image = normalize(image)
         if actions is not None: # training time
             # actions = actions[:, :self.model.num_queries]
             # is_pad = is_pad[:, :self.model.num_queries]
 
             a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, images, env_state, actions, is_pad, debug=debug.print, ignore_latent=ignore_latent)
             
-            visualize_data([img[0] for img in images], qpos[0], actions[0], is_pad[0], a_hat[0])
+            visualize_data([img[0] for img in images], qpos[0], a_hat[0], is_pad[0], actions[0])
 
             total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar)
             loss_dict = dict()

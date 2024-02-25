@@ -6,7 +6,7 @@ import math
 import torch
 from torch import nn
 
-from ..util.misc import NestedTensor
+# from ..util.misc import NestedTensor
 
 import IPython
 e = IPython.embed
@@ -66,7 +66,7 @@ class PositionEmbeddingLearned(nn.Module):
         nn.init.uniform_(self.row_embed.weight)
         nn.init.uniform_(self.col_embed.weight)
 
-    def forward(self, tensor_list: NestedTensor):
+    def forward(self, tensor_list):#: NestedTensor):
         x = tensor_list.tensors
         h, w = x.shape[-2:]
         i = torch.arange(w, device=x.device)
@@ -91,3 +91,50 @@ def build_position_encoding(args):
         raise ValueError(f"not supported {args.position_embedding}")
 
     return position_embedding
+
+if __name__ == '__main__':
+    # position_embedding = PositionEmbeddingSine(512//2)
+    import matplotlib.pyplot as plt
+    # pos = position_embedding(torch.zeros(1, 512, 10, 10))
+    # print(pos.shape)
+    # plt.imshow(pos[0].flatten(1).cpu().numpy().T)
+    # plt.show()
+
+    import numpy as np
+
+    def positional_encoding(height, width, d_model):
+        """
+        Generates positional encodings for a given feature map size.
+        
+        Args:
+        - height (int): Height of the feature map.
+        - width (int): Width of the feature map.
+        - d_model (int): Dimensionality of the model.
+        
+        Returns:
+        - np.array: Positional encodings of shape (height * width, d_model).
+        """
+        pos_enc = np.zeros((height, width, d_model))
+        for pos_row in range(height):
+            for pos_col in range(width):
+                for i in range(0, d_model, 2):
+                    pos_enc[pos_row, pos_col, i] = np.sin(pos_row / (10000 ** ((2 * i)/d_model)))
+                    pos_enc[pos_row, pos_col, i + 1] = np.cos(pos_col / (10000 ** ((2 * (i + 1))/d_model)))
+                    
+        pos_enc = pos_enc.reshape(-1, d_model)
+        return pos_enc
+
+    # Assuming h x w x 512 feature map
+    h, w, d_model = 8, 8, 512
+    n_tokens = h * w
+
+    # Generate positional encoding
+    pos_encodings = positional_encoding(h, w, d_model)
+
+    print("Shape of positional encodings:", pos_encodings.shape)
+    plt.imshow(pos_encodings)
+    plt.show()
+
+
+
+
