@@ -109,6 +109,7 @@ def touch_coefficent(filename):
     plt.show()
 
 
+
 if __name__ == "__main__":
     # filename = "/home/aigeorge/research/TactileACT/data/camera_cage/data/episode_0.hdf5"
     # filename = "/home/aigeorge/research/TactileACT/test.hdf5"

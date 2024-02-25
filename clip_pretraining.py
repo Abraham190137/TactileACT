@@ -58,12 +58,13 @@ def replace_bn_with_gn(
 
 # the projection head for CLIP. I'm using resnet's approach of an average pooling layer followed by a linear layer.
 class ClipProjectionHead(nn.Module):
-    def __init__(self, out_dim: int, conditioning_dim: int = 0, num_channels:int = 512):
+    def __init__(self, out_dim: int, conditioning_dim: int = 0, num_channels:int = 512, normailize: bool = True):
         super().__init__()
         self.pooling = nn.AdaptiveAvgPool2d((1, 1))
         self.flatten = nn.Flatten(1, -1)
         # print('conditioning_dim:', conditioning_dim)
         self.linear = nn.Linear(num_channels + conditioning_dim, out_dim)
+        self.normalize = normailize
     
     def forward(self, feature_map, conditioning=None) -> torch.Tensor:
         # print('feature_map:', feature_map.shape)
@@ -73,7 +74,12 @@ class ClipProjectionHead(nn.Module):
         if conditioning is not None:
             x = torch.cat((x, conditioning), dim=-1)
 
-        return self.linear(x)
+        x = self.linear(x)
+
+        if self.normalize:
+            x = F.normalize(x, dim=-1)
+
+        return x
 
 def modified_resnet18(weights=None, features_per_group=16) -> nn.Module:
     # get a resnet18 model
@@ -282,7 +288,7 @@ def clip_pretraining(train_loader: DataLoader,
                      device: torch.device,
                      save_dir: str,
                      save_freq: int = 100,
-                     plot_freq: int = 10,
+                     plot_freq: int = 50,
                      n_epochs: int = 1000,
                      clip_dim: int = 512,
                      features_per_group: int = 16,
@@ -316,10 +322,14 @@ def clip_pretraining(train_loader: DataLoader,
     # create a projection head, conditioned on state
     gelsight_projection = ClipProjectionHead(out_dim=clip_dim, conditioning_dim=state_size).to(device)
 
+    # create a learnable parameter for the logit scale and add it to the optimizer.
+    logit_scale = torch.nn.Parameter(torch.ones(1).to(device))
+
     optim_params = [{"params": gelsight_encoder.parameters(), "lr": resnet_lr},
                     {"params": gelsight_projection.parameters(), "lr": projection_lr},
                     {"params": vision_encoder.parameters(), "lr": resnet_lr},
-                    {"params": vision_projection.parameters(), "lr": projection_lr}]
+                    {"params": vision_projection.parameters(), "lr": projection_lr},
+                    {"params": logit_scale, "lr": projection_lr}]
 
     print('optim_params:', optim_params)
 
@@ -382,6 +392,10 @@ def clip_pretraining(train_loader: DataLoader,
             optimizer.zero_grad()
             loss.mean().backward()
             optimizer.step()
+
+            # clamp the logit scale to be between 0.05 and 100
+            logit_scale.data = torch.clamp(logit_scale.data, 0.05, 100)
+
         training_losses[epoch] = training_loss/len(train_loader)
 
         # test the model
@@ -452,18 +466,25 @@ def clip_pretraining(train_loader: DataLoader,
             plt.savefig(f'{save_dir}/graphs/training_loss.png')
             plt.close()
 
+        # save the losses as a np file
+        np.save(f'training_losses.npy', training_losses)
+        np.save(f'testing_losses.npy', testing_losses)
+
         # save the models
         if (epoch+1) % save_freq == 0:
             torch.save(vision_encoder.state_dict(), f'{save_dir}/epoch_{epoch}_vision_encoder.pth')
             torch.save(vision_projection.state_dict(), f'{save_dir}/epoch_{epoch}_vision_projection.pth')
             torch.save(gelsight_encoder.state_dict(), f'{save_dir}/epoch_{epoch}_gelsight_encoder.pth')
             torch.save(gelsight_projection.state_dict(), f'{save_dir}/epoch_{epoch}_gelsight_projection.pth')
+
+        print('logit_scale:', logit_scale)
    
 
-if __name__ == "__main__":
+def run_clip_pretraining():
     from utils import get_norm_stats
-    num_episodes = 39
-    dataset_dir = "/home/aigeorge/research/TactileACT/data/camera_cage/data"
+    num_episodes = 101
+    dataset_dir = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data"
+    save_dir = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/normalized"
     camera_names = ['1', '2', '3', '4', '5', '6']
     norm_stats = get_norm_stats(dataset_dir, num_episodes, use_existing=True)
     batch_size_train = 2
@@ -479,9 +500,9 @@ if __name__ == "__main__":
     val_indices = shuffled_indices[int(train_ratio * num_episodes):]
 
     train_dataset = ClipDataset(train_indices, dataset_dir, camera_names, norm_stats, n_images=n_clip_images, min_distance=min_distance)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=10, prefetch_factor=10, pin_memory_device='cuda')
     test_dataset = ClipDataset(val_indices, dataset_dir, camera_names, norm_stats, n_images=n_clip_images, min_distance=min_distance)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=True, pin_memory=True, num_workers=10, prefetch_factor=10, pin_memory_device='cuda')
 
     # test the dataloader
     for images, gelsight, position in train_dataloader:
@@ -493,15 +514,15 @@ if __name__ == "__main__":
     # create directory to save models and plots
     # get all folders in the clip_models directory
     ns = [-1]
-    for folder in os.listdir('clip_models'):
+    for folder in os.listdir(save_dir):
         ns.append(int(folder))
 
     n = max(ns) + 1
-    os.makedirs(f'clip_models/{n}')
-    os.makedirs(f'clip_models/{n}/graphs')
+    os.makedirs(f'{save_dir}/{n}')
+    os.makedirs(f'{save_dir}/{n}/graphs')
 
     # save run stats:
-    with open(f'clip_models/{n}/run_stats.txt', 'w') as f:
+    with open(f'{save_dir}/{n}/run_stats.txt', 'w') as f:
         f.write(f'num_episodes: {num_episodes}\n')
         f.write(f'dataset_dir: {dataset_dir}\n')
         f.write(f'camera_names: {camera_names}\n')
@@ -513,4 +534,48 @@ if __name__ == "__main__":
         f.write(f'train_indices: {train_indices}\n')
         f.write(f'val_indices: {val_indices}\n')
         
-    clip_pretraining(train_dataloader, test_dataloader, device, save_dir=f'clip_models/{n}', clip_dim=512, features_per_group=16, n_epochs=2000)
+    clip_pretraining(train_dataloader, test_dataloader, device, save_dir=f'{save_dir}/{n}', clip_dim=512, features_per_group=16, n_epochs=1501)
+
+
+def replot_loss_graph(training_losses, testing_losses):
+    # training_losses: N X cameras
+    # testing_losses: N X cameras
+    from matplotlib import pyplot as plt
+    n_cameras = training_losses.shape[1]
+
+    total_train = training_losses.mean(axis=1)
+    total_test = testing_losses.mean(axis=1)
+
+    # smooth the losses (running average)
+    window_size = 10
+    smooth_train =  np.zeros_like(total_train)
+    smooth_test =  np.zeros_like(total_test)
+    for i in range(len(total_train)):
+        if i < window_size:
+            smooth_train[i] = total_train[:i].mean()
+            smooth_test[i] = total_test[:i].mean()
+        else:
+            smooth_train[i] = total_train[i-window_size:i].mean()
+            smooth_test[i] = total_test[i-window_size:i].mean()
+
+
+    plt.figure()
+    # for i in range(n_cameras):
+        # smoothed_train = np.convolve(training_losses[:, i], np.ones(window_size), 'valid') / window_size
+        # smoothed_test = np.convolve(testing_losses[:, i], np.ones(window_size), 'valid') / window_size
+        # plt.plot(smoothed_train, label=f'camera {i+1} train', c=f'C{i}')
+        # plt.plot(smoothed_test, label=f'camera {i+1} test', linestyle='dashed', c=f'C{i}')
+    plt.plot(smooth_train, label=f'Training loss', c='r')
+    plt.plot(smooth_test, label=f'Testing loss', c='b')
+    plt.legend(loc='best')
+    plt.title(f'Training and Testing Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.show()
+
+
+if __name__ == "__main__":
+    run_clip_pretraining()
+    # training_losses = np.load('/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch1450-training_losses.npy')[:1450]
+    # testing_losses = np.load('/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch1450-testing_losses.npy')[:1450]
+    # replot_loss_graph(training_losses, testing_losses)
