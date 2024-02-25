@@ -1,4 +1,6 @@
 data/
+data
+multiprocessed_cameras.py
 clip_graphs/
 clip_models/
 visualizations/

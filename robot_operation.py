@@ -8,6 +8,12 @@ from typing import Dict, List, Tuple
 import cv2
 import torch
 import os
+from frankapy import FrankaArm
+from frankapy import FrankaConstants as FC
+from robomail.motion import GotoPoseLive
+
+from simple_gelsight import GelSightMultiprocessed, get_camera_id
+from multiprocessed_cameras import MultiprocessedCameras
 
 image_size = (400, 480)
 
@@ -63,13 +69,14 @@ class PreprocessData:
                 raise ValueError(f"Camera name {cam_name} not found in images")
             
         # get rid of velocities
-        qpos = np.concatenate([qpos[:3], qpos[6:]])
+        if qpos.shape[0] == 7:
+            qpos = np.concatenate([qpos[:3], qpos[6:]])
         qpos = (qpos - self.mean) / self.std
         qpos_data = torch.from_numpy(qpos).float().unsqueeze(0)
 
         return all_images, qpos_data        
 
-def visualize(images, qpos, actions, ground_truth):
+def visualize(images, qpos, actions, ground_truth=None):
 
     import matplotlib.pyplot as plt
     # Create a figure and axes
@@ -86,7 +93,8 @@ def visualize(images, qpos, actions, ground_truth):
     ax2 = subfigs[1].add_subplot(111, projection='3d')
     # ax2.scatter(actions[:, 0], actions[:, 1], actions[:, 2], c='b', marker='o')
     sc = ax2.scatter(actions[:, 0], actions[:, 1], actions[:, 2], c=c, cmap='viridis', marker='x')
-    ax2.scatter(ground_truth[:, 0], ground_truth[:, 1], ground_truth[:, 2], c=c, cmap = 'viridis', marker='o')
+    if ground_truth is not None:
+        ax2.scatter(ground_truth[:, 0], ground_truth[:, 1], ground_truth[:, 2], c=np.arange(len(ground_truth)), cmap = 'viridis', marker='o')
     ax2.scatter(qpos[0], qpos[1], qpos[2], c='r', marker='o')
     ax2.set_xlabel('X')
     ax2.set_ylabel('Y')
@@ -105,21 +113,28 @@ def visualize(images, qpos, actions, ground_truth):
     
 
 if __name__ == '__main__':
-    model_path = "/home/aigeorge/research/TactileACT/data/camera_cage/pretrained_1999_melted/policy_last.ckpt"
-    args_file = "/home/aigeorge/research/TactileACT/data/camera_cage/pretrained_1999_melted/args.json"
+    import time
+    fa = FrankaArm()
+    fa.reset_joints()
+    fa.open_gripper()
+    move_pose = FC.HOME_POSE
+    move_pose.translation = np.array([0.6, 0, 0.35])
+    fa.goto_pose(move_pose)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    act = load_ACT(model_path, args_file).to(device)
+    pose_controller = GotoPoseLive(step_size=0.05)
+    pose_controller.set_goal_pose(move_pose)
 
-    gelsight_means = []
+    model_path = "/home/abraham/TactileACT/data/pretrained_1999_melted/policy_last.ckpt"
+    args_file = "/home/abraham/TactileACT/data/pretrained_1999_melted/args.json"
 
-    # pretend to be a robot by loading a dataset
-    data_dir = "//home/aigeorge/research/TactileACT/data/original/camara_cage_1/run_0/episode_3/episode_3.hdf5"
+    """# pretend to be a robot by loading a dataset
+    data_dir = "/mnt/ssd/abraham/Tactile_ACT_Data/camara_cage_1/run_0/episode_3/episode_3.hdf5"
     with h5py.File(data_dir, 'r') as root:
         qpos = root['/observations/position'][()]
         gt_actions = root['/goal_position'][()]
         all_gelsight_data = root['observations/gelsight/depth_strain_image'][()]
         num_episodes = root.attrs['num_timesteps']
+        num_episodes = 50
 
         all_images = {}
         for cam in root.attrs['camera_names']:
@@ -134,21 +149,57 @@ if __name__ == '__main__':
             
             all_images[cam] = np.array(video_images)
             cap.release()
-        
+    """
+    camera_id = get_camera_id('GelSight')
+    gelsight = GelSightMultiprocessed(camera_id, use_gpu=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device {device}")
+    act = load_ACT(model_path, args_file).to(device)
+    
+    camera_nums = [1, 2, 3, 4, 5, 6]
+    camera_sizes = [(1080, 1920), (1080, 1920), (1080, 1920), (1080, 1920), (1080, 1920), (800, 1280)]
+    cameras = MultiprocessedCameras(camera_nums, camera_sizes, 30)
+    min_gripper_width = 0.007
 
     # get the norm stats from args_file, need to convert to numpy array
+
     args = json.load(open(args_file, 'r'))
     norm_stats = {k: np.array(v) for k, v in args['norm_stats'].items()}
 
+    horizon = args['chunk_size']
+
     # create the fake dataset
     preprocess = PreprocessData(norm_stats, args['camera_names'])
+    
+    num_episodes = 200
+    grip_closed = False
+
+    temporal_ensemble = True
+    K = 0.5
+
+    action_history = np.zeros([num_episodes + horizon, num_episodes, 4]) # prediction_time, time_preiction_was_made, action
+    weight_kernal = np.exp(-np.arange(horizon-1, -1, -1) * K)
+    weight_kernal = weight_kernal / np.sum(weight_kernal)
+    # stack the weights to the correct shape
+    weight_kernal = np.stack([weight_kernal]*4, axis=1)
+    print("weight_kernal", weight_kernal.shape, weight_kernal)
 
     for i in range(num_episodes):
-        images = {key: all_images[key][i] for key in all_images}
+        images = cameras.get_next_frames()
+        frame, marker_data, depth, strain_x, strain_y = gelsight.get_next_frame()
 
-        image_data, qpos_data = preprocess.process_data(images, all_gelsight_data[i], qpos[i])
-        print(len(image_data))
-        print(image_data[0].shape, qpos_data.shape)
+        robo_data = fa.get_robot_state()
+        current_pose = robo_data['pose']*fa._tool_delta_pose
+        
+        # cur_joints = robo_data['joints']
+        # cur_vel = robo_data['joint_velocities']
+        finger_width = robo_data['gripper_width']
+        qpos = np.zeros(4)
+        qpos[:3] = current_pose.translation
+        qpos[3] = finger_width
+        print("qpos", qpos)
+        image_data, qpos_data = preprocess.process_data(images, np.stack([depth, strain_x, strain_y], axis=-1), qpos)
 
         # get the action from the model
         qpos_data = qpos_data.to(device)
@@ -157,12 +208,37 @@ if __name__ == '__main__':
 
         # unnormalize the actions and qpos 
         all_actions = all_actions.squeeze().detach().cpu().numpy() * preprocess.std + preprocess.mean
-        qpos_data = qpos_data.squeeze().detach().cpu().numpy() * preprocess.std + preprocess.mean
-        print("all actions", all_actions)
-        print("qpos", qpos_data.shape)
-        print("gt", gt_actions.shape)
+        action_history[i:i+horizon, i] = all_actions.copy() 
+
+        if temporal_ensemble:
+            print('i', i)
+            if i < horizon-1:
+                time_step_actions = action_history[i, :i+1, :].copy()
+                ensembled_action = np.sum(action_history[i, :i+1, :] * weight_kernal[-(i+1):], axis=0)/np.sum(weight_kernal[-(i+1):, 0])
+            else:
+                time_step_actions = action_history[i, i-horizon+1:i+1, :].copy()
+                ensembled_action = np.sum(action_history[i, i-horizon+1:i+1, :] * weight_kernal, axis=0)
+            print("time_step_actions", time_step_actions)
+            print("current_pose", current_pose.translation)
+            print("ensembled_action", ensembled_action)
+            print('current_action', all_actions[0])
 
         # visualize the data
-        if i%10 == 0:
-            vis_images = [image_data[j].squeeze().detach().cpu().numpy().transpose(1, 2, 0) for j in range(len(image_data))]
-            visualize(vis_images, qpos_data, all_actions, gt_actions[i:i+args['chunk_size']])
+        vis_images = [image_data[j].squeeze().detach().cpu().numpy().transpose(1, 2, 0) for j in range(len(image_data))]
+        skip_amount = 0
+        move_pose = FC.HOME_POSE
+        move_pose.translation = ensembled_action[:3]
+        pose_controller.step(move_pose, current_pose)
+        grip_command = ensembled_action[3]
+        grip_command = np.clip(grip_command, 0, 0.08)
+        if grip_command <= min_gripper_width and not grip_closed:
+            grip_closed = True
+            fa.goto_gripper(min_gripper_width)
+            print("closing gripper")
+        else:
+            grip_closed = False
+            fa.goto_gripper(grip_command)
+            print("gripper width", grip_command)
+        if i % 5 == 0:
+            visualize(vis_images, qpos, all_actions, time_step_actions)
+        # input("Press enter to continue")
