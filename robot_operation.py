@@ -15,6 +15,18 @@ from robomail.motion import GotoPoseLive
 from simple_gelsight import GelSightMultiprocessed, get_camera_id
 from multiprocessed_cameras import MultiprocessedCameras
 
+from utils import NormalizeActionQpos, NormalizeDeltaActionQpos
+
+def visualize_gelsight_data(image):
+    # Convert the image to LAB color space
+    max_depth = 10
+    max_strain = 30
+    # Show all three using LAB color space
+    image[:, :, 0] = np.clip(100*np.maximum(image[:, :, 0], 0)/max_depth, 0, 100)
+    # normalized_depth = np.clip(100*(depth_image/depth_image.max()), 0, 100)
+    image[:, :, 1:] = np.clip(128*(image[:, :, 1:]/max_strain), -128, 127)
+    return cv2.cvtColor(image.astype(np.float32), cv2.COLOR_LAB2BGR)
+
 image_size = (400, 480)
 
 class PreprocessData:
@@ -24,8 +36,8 @@ class PreprocessData:
     def __init__(self, norm_stats, camera_names):
         self.image_normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                             std=[0.229, 0.224, 0.225])
-        self.mean = (norm_stats["action_mean"] + norm_stats["qpos_mean"]) / 2
-        self.std = (norm_stats["action_std"] + norm_stats["qpos_std"]) / 2
+        # self.normalizer = NormalizeActionQpos(norm_stats)
+        self.normalizer = NormalizeDeltaActionQpos(norm_stats)
         self.gelsight_mean = norm_stats["gelsight_mean"]
         self.gelsight_std = norm_stats["gelsight_std"]
         self.masks = make_masks(image_size=image_size, verticies=MASK_VERTICIES)
@@ -71,7 +83,7 @@ class PreprocessData:
         # get rid of velocities
         if qpos.shape[0] == 7:
             qpos = np.concatenate([qpos[:3], qpos[6:]])
-        qpos = (qpos - self.mean) / self.std
+        qpos = self.normalizer.normalize_qpos(qpos)
         qpos_data = torch.from_numpy(qpos).float().unsqueeze(0)
 
         return all_images, qpos_data        
@@ -124,8 +136,9 @@ if __name__ == '__main__':
     pose_controller = GotoPoseLive(step_size=0.05)
     pose_controller.set_goal_pose(move_pose)
 
-    model_path = "/home/abraham/TactileACT/data/pretrained_1999_melted/policy_last.ckpt"
-    args_file = "/home/abraham/TactileACT/data/pretrained_1999_melted/args.json"
+    model_path = "/home/abraham/TactileACT/data/delta_1999_no_pretraining/policy_last.ckpt"
+    save_video_path = "/home/abraham/TactileACT/data/delta_1999_no_pretraining/videos/"
+    args_file = "/home/abraham/TactileACT/data/delta_1999_no_pretraining/args.json"
 
     """# pretend to be a robot by loading a dataset
     data_dir = "/mnt/ssd/abraham/Tactile_ACT_Data/camara_cage_1/run_0/episode_3/episode_3.hdf5"
@@ -160,7 +173,7 @@ if __name__ == '__main__':
     camera_nums = [1, 2, 3, 4, 5, 6]
     camera_sizes = [(1080, 1920), (1080, 1920), (1080, 1920), (1080, 1920), (1080, 1920), (800, 1280)]
     cameras = MultiprocessedCameras(camera_nums, camera_sizes, 30)
-    min_gripper_width = 0.007
+    min_gripper_width = 0.0055
 
     # get the norm stats from args_file, need to convert to numpy array
 
@@ -176,14 +189,11 @@ if __name__ == '__main__':
     grip_closed = False
 
     temporal_ensemble = True
-    K = 0.5
+    K = 0.25
 
     action_history = np.zeros([num_episodes + horizon, num_episodes, 4]) # prediction_time, time_preiction_was_made, action
-    weight_kernal = np.exp(-np.arange(horizon-1, -1, -1) * K)
-    weight_kernal = weight_kernal / np.sum(weight_kernal)
+    confidences = []
     # stack the weights to the correct shape
-    weight_kernal = np.stack([weight_kernal]*4, axis=1)
-    print("weight_kernal", weight_kernal.shape, weight_kernal)
 
     # # pretend to be a robot by loading a dataset
     # data_dir = "//home/aigeorge/research/TactileACT/data/original/camara_cage_1/run_0/episode_3/episode_3.hdf5"
@@ -207,6 +217,7 @@ if __name__ == '__main__':
     #         all_images[cam] = np.array(video_images)
     #         cap.release()
 
+    run_images = []
     for i in range(num_episodes):
         # images = {key: all_images[key][i] for key in all_images}
         # gelsight_data = all_gelsight_data[i]
@@ -230,41 +241,100 @@ if __name__ == '__main__':
         # get the action from the model
         qpos_data = qpos_data.to(device)
         image_data = [img.to(device) for img in image_data]
-        all_actions = act(qpos_data, image_data)
+        deltas:torch.Tensor = act(qpos_data, image_data)
 
         # unnormalize the actions and qpos 
-        all_actions = all_actions.squeeze().detach().cpu().numpy() * preprocess.std + preprocess.mean
-        action_history[i:i+horizon, i] = all_actions.copy() 
+        deltas = deltas.squeeze().detach().cpu().numpy()
+        # print("deltas", deltas)
+        unnormalized_deltas = preprocess.normalizer.unnormalize_delta(deltas)
+        # print("unnormalized_deltas", unnormalized_deltas)
+        all_actions = unnormalized_deltas + qpos
+        all_actions[:, 3] = np.clip(unnormalized_deltas[:, 3], 0, 0.08) # use output grip width and clip it
+        # print("all_actions", all_actions)
+        action_history[i:i+horizon, i] = all_actions
 
         if temporal_ensemble:
             print('i', i)
-            if i < horizon-1:
-                time_step_actions = action_history[i, :i+1, :].copy()
-                ensembled_action = np.sum(action_history[i, :i+1, :] * weight_kernal[-(i+1):], axis=0)/np.sum(weight_kernal[-(i+1):, 0])
-            else:
-                time_step_actions = action_history[i, i-horizon+1:i+1, :].copy()
-                ensembled_action = np.sum(action_history[i, i-horizon+1:i+1, :] * weight_kernal, axis=0)
+            ensembled_action = np.zeros(4)
+            total_weight = 0
+            time_step_actions = []
+            
+            K = 0.1 + np.mean(np.mean(gelsight_data, axis=(0, 1))**2)
+            confidences.insert(0, 1) # add the confidence to the front of the list (this time step)
+            if len(confidences) > horizon:
+                confidences.pop() # remove the last confidence from the list 
+            
+            for t in range(min(i+1, horizon)):
+                ensembled_action += confidences[t]*action_history[i, i-t, :]
+                total_weight += confidences[t]
+                confidences[t] *= np.exp(-K) # update the confidence
+                time_step_actions.append(action_history[i, i-t, :])
+
+            time_step_actions = np.array(time_step_actions)
+            ensembled_action /= total_weight
             print("time_step_actions", time_step_actions)
+            print('confidences', confidences)
+            print('current_delta', unnormalized_deltas[0])
             print("current_pose", current_pose.translation)
             print("ensembled_action", ensembled_action)
             print('current_action', all_actions[0])
+            print('abs mean gelsight', np.mean(gelsight_data, axis=(0, 1)))
+            print("K", K)
 
         # visualize the data
         vis_images = [image_data[j].squeeze().detach().cpu().numpy().transpose(1, 2, 0) for j in range(len(image_data))]
+        run_images.append(vis_images)
+
         skip_amount = 0
         move_pose = FC.HOME_POSE
         move_pose.translation = ensembled_action[:3]
         pose_controller.step(move_pose, current_pose)
         grip_command = ensembled_action[3]
         grip_command = np.clip(grip_command, 0, 0.08)
-        if grip_command <= min_gripper_width and not grip_closed:
-            grip_closed = True
-            fa.goto_gripper(min_gripper_width)
-            print("closing gripper")
+        if grip_command <= min_gripper_width:
+            if not grip_closed:
+                grip_closed = True
+                fa.goto_gripper(min_gripper_width)
+                print("closing gripper")
         else:
             grip_closed = False
             fa.goto_gripper(grip_command)
             print("gripper width", grip_command)
-        if i % 5 == 0:
-            visualize(vis_images, qpos, all_actions, time_step_actions)
-        # input("Press enter to continue")
+        # if i % 5 == 0:
+        #     visualize(vis_images, qpos, all_actions, time_step_actions)
+        if i % 3 == 0:
+            command = input("Press enter to continue, v to visualize, or q to quit")
+            if command == 'q':
+                break
+            elif command == 'v':
+                visualize(vis_images, qpos, all_actions, time_step_actions)
+
+    # gelsight.close()
+    # cameras.close()
+    # save the video
+    print("saving video")
+    fourcc_avi = cv2.VideoWriter_fourcc(*'HFYU')
+    fourcc_mp4 = cv2.VideoWriter_fourcc(*'mp4v')
+    # get the time for the video
+    current_time = time.strftime("%Y%m%d-%H%M%S")
+    os.makedirs(os.path.join(save_video_path, f'run_{current_time}'))
+    run_video_path = os.path.join(save_video_path, f'run_{current_time}')
+    for cam_num, save_cam in enumerate(args['camera_names']):
+        print('saving', save_cam)
+        cam_size = run_images[0][cam_num].shape[:2][::-1]
+        out_avi = cv2.VideoWriter(os.path.join(run_video_path, f'cam_{save_cam}.avi'), fourcc_avi, 10.0, cam_size)
+        out_mp4 = cv2.VideoWriter(os.path.join(run_video_path, f'cam_{save_cam}.mp4'), fourcc_mp4, 10.0, cam_size)
+        for images in run_images:
+            # unnormalize the image (standard resnet normalization)
+            if save_cam != "gelsight":
+                image = images[cam_num] * np.array([0.229, 0.224, 0.225]) + np.array([0.485, 0.456, 0.406])
+                out_avi.write((image*255).astype(np.uint8))
+                out_mp4.write((image*255).astype(np.uint8))
+            else:
+                image = images[cam_num]*norm_stats['gelsight_std'] + norm_stats['gelsight_mean']
+                out_avi.write((visualize_gelsight_data(image)*255).astype(np.uint8))
+                out_mp4.write((visualize_gelsight_data(image)*255).astype(np.uint8))
+
+        out_avi.release()
+        out_mp4.release()
+    print("done")

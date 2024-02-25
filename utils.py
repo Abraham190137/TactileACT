@@ -23,6 +23,18 @@ class NormalizeActionQpos:
         action = (action - self.mean) / self.std
         return qpos, action
     
+    def normalize_qpos(self, qpos):
+        return (qpos - self.mean) / self.std
+    
+    def normalize_action(self, action):
+        return (action - self.mean) / self.std
+    
+    def unnormalize_qpos(self, qpos):
+        return qpos * self.std + self.mean
+    
+    def unnormalize_action(self, action):
+        return action * self.std + self.mean
+    
     def unnormalize(self, qpos, action):
         new_qpos = qpos * self.std + self.mean
         new_action = action * self.std + self.mean
@@ -43,6 +55,15 @@ class NormalizeDeltaActionQpos:
         qpos = (qpos - self.qpos_mean) / self.qpos_std
         delta = (delta - self.delta_mean) / self.delta_std
         return qpos, delta
+    
+    def normalize_qpos(self, qpos):
+        return (qpos - self.qpos_mean) / self.qpos_std
+    
+    def unnormalize_qpos(self, normalized_qpos):
+        return normalized_qpos * self.qpos_std + self.qpos_mean
+    
+    def unnormalize_delta(self, normalized_delta):
+        return normalized_delta * self.delta_std + self.delta_mean
     
     def unnormalize(self, normalized_qpos, normalized_delta):
         qpos = normalized_qpos * self.qpos_std + self.qpos_mean
