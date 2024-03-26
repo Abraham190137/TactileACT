@@ -125,6 +125,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
             for cam_name in self.camera_names:
                 # seperate processing for gelsight:
                 if cam_name == 'gelsight':
+                    size = (root.attrs['gelsight_height'], root.attrs['gelsight_width'])
                     gelsight_data = root['observations/gelsight/depth_strain_image'][start_ts]
                     # gelsight_data = cv2.resize(gelsight_data, (self.image_size[1], self.image_size[0]))
                     # adjust gelsight data using the mean and std
@@ -133,6 +134,12 @@ class EpisodicDataset(torch.utils.data.Dataset):
                     gelsight_data = torch.einsum('h w c -> c h w', gelsight_data) # change to c h w
                     all_cam_images.append(gelsight_data)
                 
+                elif cam_name == "blank":
+                    image = np.zeros((self.image_size[0], self.image_size[1], 3), dtype=np.float32)
+                    image = torch.tensor(image, dtype=torch.float32)
+                    image = torch.einsum('h w c -> c h w', image)
+                    all_cam_images.append(image)
+
                 else:
                     image = root[f'/observations/images/{cam_name}'][start_ts]
                     # resize image
@@ -146,6 +153,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
                     image = torch.einsum('h w c -> c h w', image) # change to c h w
                     image = self.image_normalize(image)
                     all_cam_images.append(image)
+
 
 
             # get all actions after and including start_ts, with the max length of chunk_size

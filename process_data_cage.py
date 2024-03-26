@@ -237,7 +237,7 @@ def process_folder(source_folders, save_folder, image_size = [400, 480], masks =
     with Pool() as p:
         p.starmap(uncompress_data, zip(episode_folders, save_paths, [image_size]*len(save_paths), [masks]*len(save_paths)))
 
-def save_norm_stats(save_folder):
+def save_norm_stats(save_folder, num_episodes = None):
     # get the number of episodes
     # find all the episodes in the source folder recursively
     h5py_files = []
@@ -246,7 +246,8 @@ def save_norm_stats(save_folder):
             if file.endswith('.hdf5'):
                 h5py_files.append(os.path.join(root, file))
 
-    num_episodes = len(h5py_files)
+    if num_episodes is None:
+        num_episodes = len(h5py_files)
 
     # get norm stats and save them
     gelsight_mean, gelsight_std = gelsight_norm_stats(save_folder, num_episodes)
@@ -260,16 +261,13 @@ if __name__ == "__main__":
     image_size = [400, 480]
     masks = make_masks(image_size, MASK_VERTICIES)
 
-    source_folders = ['/home/aigeorge/research/TactileACT/data/original/camara_cage_2_new_mount/',
-                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_3/',
-                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_5_crack_gel/',
-                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_6_new_gel/']
+    source_folders = ['/home/aigeorge/research/TactileACT/data/original/camara_cage_8_new_fixed/']
     
-    save_folder = '/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data'
+    save_folder = '/home/aigeorge/research/TactileACT/data/camera_cage_new_fixed/data'
 
     # process_folder(source_folders, save_folder, image_size, masks)
 
-    save_norm_stats(save_folder)
+    save_norm_stats(save_folder, 100)
 
     # source_file = '/home/aigeorge/research/TactileACT/data/original/camara_cage_1/run_0/episode_3'
     # save_file = '/home/aigeorge/research/TactileACT/test.hdf5'

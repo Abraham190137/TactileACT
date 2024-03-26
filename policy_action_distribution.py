@@ -57,8 +57,10 @@ class ACTPolicy(nn.Module):
         else:
             num_backbones = len(set(cam_backbone_mapping.values()))
 
+        # if pretrained_backbones is not None:
+        #     assert len(pretrained_backbones) == num_backbones
         if pretrained_backbones is not None:
-            assert len(pretrained_backbones) == num_backbones
+            num_backbones = len(pretrained_backbones)
 
         # build model:
         # Build backbones:

@@ -1,8 +1,14 @@
 import torchvision
 from torch import nn
 import torch
-from typing import Tuple, Sequence, Dict, Union, Optional, Callable, List
+from typing import Tuple, Dict, Union, Callable, List
 from torch.utils.data import DataLoader
+import h5py
+import os
+import cv2
+from torchvision.transforms import Normalize
+import numpy as np
+
 
 def replace_submodules(
         root_module: nn.Module,
@@ -59,18 +65,24 @@ def replace_bn_with_gn(
 # the projection head for CLIP. I'm using resnet's approach of an average pooling layer followed by a linear layer.
 class ClipProjectionHead(nn.Module):
     def __init__(self, out_dim: int, conditioning_dim: int = 0, num_channels:int = 512, normailize: bool = True):
+        """
+        Create a projection head for CLIP. The projection head consists of an 
+        average pooling layer followed by a linear layer.
+        out_dim: The output dimension of the linear layer.
+        conditioning_dim: The dimension of the conditioning vector. If 0, no conditioning is used.
+        num_channels: The number of channels in the feature map.
+        normailize: If true, the output of the linear layer is normalized. (default: True)
+        """
+
         super().__init__()
         self.pooling = nn.AdaptiveAvgPool2d((1, 1))
         self.flatten = nn.Flatten(1, -1)
-        # print('conditioning_dim:', conditioning_dim)
         self.linear = nn.Linear(num_channels + conditioning_dim, out_dim)
         self.normalize = normailize
     
     def forward(self, feature_map, conditioning=None) -> torch.Tensor:
-        # print('feature_map:', feature_map.shape)
         x = self.pooling(feature_map)
         x = self.flatten(x)
-        # print('post pooling:', x.shape)
         if conditioning is not None:
             x = torch.cat((x, conditioning), dim=-1)
 
@@ -82,6 +94,11 @@ class ClipProjectionHead(nn.Module):
         return x
 
 def modified_resnet18(weights=None, features_per_group=16) -> nn.Module:
+    """
+    Get a resnet18 model with all BatchNorm layers replaced with GroupNorm.
+    weights: The weights to load into the model. If None, uses default pretraiend weights.
+    features_per_group: The number of features per group in the GroupNorm layer.
+    return: The modified resnet18 model."""
     # get a resnet18 model
     resnet18 = getattr(torchvision.models, 'resnet18')(weights=weights)
 
@@ -92,13 +109,13 @@ def modified_resnet18(weights=None, features_per_group=16) -> nn.Module:
     resnet18 = replace_bn_with_gn(resnet18, features_per_group=features_per_group)
     return resnet18    
 
-import h5py
-import os
-import cv2
-from torchvision.transforms import Normalize
-import numpy as np
 
 class ClipDataset(torch.utils.data.Dataset):
+    """
+    A dataset for training the CLIP model. This dataset will return a set of 
+    images from a single episode, making sure they are at least min_distance apart. 
+    The images are normalized and resized to the correct size.
+    """
     def __init__(self, 
                  episode_ids: List[int], 
                  dataset_dir: str, 
@@ -106,13 +123,13 @@ class ClipDataset(torch.utils.data.Dataset):
                  norm_stats: Dict[str, Union[float, np.ndarray]],
                  image_size: Tuple[int, int] = None, 
                  gelsight_size: Tuple[int, int] = None,
-                 min_distance = 5,
-                 n_images = 10):
+                 min_distance = 10,
+                 n_images = 7):
         
         super(ClipDataset).__init__()
         self.n_images = n_images
         self.min_distance = min_distance
-        self.episode_ids = episode_ids
+        self.episode_ids = episode_ids # list of episode ids to use
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
         self.norm_stats = norm_stats
@@ -142,6 +159,7 @@ class ClipDataset(torch.utils.data.Dataset):
                 if gelsight_size is None:
                     self.gelsight_size = (root.attrs['gelsight_height'], root.attrs['gelsight_width'])   
 
+        # check that the episode lengths are long enough for the number of images and min_distance
         for length in self.episode_lengths:
             assert length >= n_images*min_distance*1.5, "To small of an episode length for the number of images and min_distance"
 
@@ -163,6 +181,7 @@ class ClipDataset(torch.utils.data.Dataset):
             if good_timestep:
                 timesteps.append(t)
 
+        # open the hdf5 file and get the images
         dataset_path = os.path.join(self.dataset_dir, f'episode_{self.episode_ids[index]}.hdf5')
         with h5py.File(dataset_path, 'r') as root:
             all_cam_images = []
@@ -174,10 +193,6 @@ class ClipDataset(torch.utils.data.Dataset):
 
                 for cam_name in self.camera_names:
                     image = root[f'/observations/images/{cam_name}'][timestep]
-                    # resize image
-                    if self.image_size != image.shape[:2]:
-                        raise ValueError("Image size must be the same for all cameras")
-                        image = cv2.resize(image, (self.image_size[1], self.image_size[0]))
                     
                     # convert to tensor
                     image = torch.tensor(image, dtype=torch.float32)/255.0
@@ -191,11 +206,6 @@ class ClipDataset(torch.utils.data.Dataset):
                 
                 # get gelsight data
                 gelsight_data = root['observations/gelsight/depth_strain_image'][timestep]
-
-                # resize gelsight data
-                if self.gelsight_size != gelsight_data.shape[:2]:
-                    raise ValueError("Image size must be the same for all cameras")
-                    gelsight_data = cv2.resize(gelsight_data, (self.gelsight_size[1], self.gelsight_size[0]))
                 
                 # convert to tensor
                 gelsight_data = torch.tensor(gelsight_data, dtype=torch.float32)
@@ -217,7 +227,7 @@ class ClipDataset(torch.utils.data.Dataset):
             
         return torch.stack(all_cam_images, axis=0), torch.stack(all_gelsight_images, axis=0), torch.stack(all_positions, axis=0)
     
-    # Create two helper get functions for evaluation
+    # Create helper get functions for evaluation
     def get_image(self, episode_idx, timestep, cam_name):
         # get an image from the hdf5 file and preprocess it.
         dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_idx}.hdf5')
@@ -257,9 +267,10 @@ class ClipDataset(torch.utils.data.Dataset):
 
         
 import torch.nn.functional as F
-def clip_loss(image_embeddings, gelsight_embeddings, target_matrix, logit_scale = 1.0, visualize = False):
+def clip_loss_non_vectorized(image_embeddings, gelsight_embeddings, target_matrix, logit_scale = 1.0, visualize = False):
+    # Same as below, but not vectorized
     loss = torch.empty(image_embeddings.shape[2]).to(image_embeddings.device)
-    avg_softmax_maps = []
+    visualizations = []
     for batch_idx in range(image_embeddings.shape[0]):
         image_targets = target_matrix
         gelsight_targets = target_matrix.T
@@ -270,16 +281,62 @@ def clip_loss(image_embeddings, gelsight_embeddings, target_matrix, logit_scale 
             gelsight_logits = logit_scale * gelsight_embeddings[batch_idx] @ image_embeddings[batch_idx, :, i].T
 
             if visualize and batch_idx == 0:
-                image_softmax = F.softmax(image_logits.clone().detach(), dim=1).cpu().numpy()
-                gelsight_softmax = F.softmax(gelsight_logits.clone().detach(), dim=1).cpu().numpy()
-                avg_softmax_maps.append((image_softmax + gelsight_softmax)/2.0)
+                visualizations.append(image_logits.clone().detach().cpu().numpy()/logit_scale)
 
             image_loss = F.cross_entropy(image_logits, gelsight_targets)
             gelsight_loss = F.cross_entropy(gelsight_logits, image_targets)
 
             loss[i] = ((image_loss + gelsight_loss)/2.0).mean()
 
-    return loss, avg_softmax_maps
+    return loss, visualizations
+
+
+
+def clip_loss(image_embeddings:torch.Tensor, gelsight_embeddings:torch.Tensor, target_matrix:torch.Tensor, logit_scale = 1.0, visualize = False):
+    """
+    Calculate the loss for the CLIP model. The loss is calculated by taking the 
+    dot product of the image embeddings and the gelsight embeddings (the
+    embeddings are normalized in the forward pass). The dot product is then 
+    scaled by logit_scale. The loss is calculated by taking the cross entropy
+    loss between the dot product and the target matrix. The target matrix is
+    the identity matrix. The loss is averaged over the batch and clip_N dimensions.
+    image_embeddings: torch.Tensor of shape (batch, clip_N, camera, clip_dim). The image embeddings.
+    gelsight_embeddings: torch.Tensor of shape (batch, clip_N, clip_dim). The gelsight embeddings.
+    target_matrix: torch.Tensor of shape (clip_N, clip_N). The target matrix.
+    logit_scale: float. The scale to apply to the dot product. (default: 1.0)"""
+
+    n_cameras = image_embeddings.shape[2]
+    batch_size = image_embeddings.shape[0]
+
+    visualizations = []
+    image_embeddings = image_embeddings.permute(0, 2, 1, 3) # batch, camera, clip_N, clip_dim
+    gelsight_embeddings = gelsight_embeddings.unsqueeze(1) # batch, 1, clip_N, clip_dim
+    image_logits = logit_scale * image_embeddings @ gelsight_embeddings.permute(0, 1, 3, 2) # dot product by multiplying by transpose
+    gelsight_logits = logit_scale * gelsight_embeddings @ image_embeddings.permute(0, 1, 3, 2)
+
+    # if visualize, save the average softmax map for each camera (only for the first batch)
+    if visualize:
+        visualizations = image_logits[0].clone().detach().cpu().numpy()/logit_scale
+    
+    # flatten the batch and camera dimensions, then calculate the loss
+    image_logits = image_logits.flatten(0, 1)
+    gelsight_logits = gelsight_logits.flatten(0, 1)
+
+    # need to make the target matrix B, N, N
+    image_loss = F.cross_entropy(image_logits, target_matrix.repeat(image_logits.shape[0], 1, 1), reduce=False).mean(dim=1)
+    gelsight_loss = F.cross_entropy(gelsight_logits, target_matrix.T.repeat(gelsight_logits.shape[0], 1, 1), reduce=False).mean(dim=1)
+
+
+    # reshape the loss to be B, N_cameras
+    image_loss = image_loss.view(batch_size, n_cameras)
+    gelsight_loss = gelsight_loss.view(batch_size, n_cameras)
+
+    loss = ((image_loss + gelsight_loss)/2.0).mean(dim=0)
+
+    # return the per-camera loss
+
+    return loss, visualizations
+
 
 from tqdm import tqdm
 
@@ -305,8 +362,6 @@ def clip_pretraining(train_loader: DataLoader,
     # get the camera, gelsight, and state dimensions from the dataset
     dataset:ClipDataset = train_loader.dataset
     n_cameras = dataset.n_cameras
-    camera_sizes = [dataset.image_size]*n_cameras
-    gelsight_size = dataset.gelsight_size
     state_size = 3
 
     # get resnet models for each camera
@@ -323,13 +378,11 @@ def clip_pretraining(train_loader: DataLoader,
     gelsight_projection = ClipProjectionHead(out_dim=clip_dim, conditioning_dim=state_size).to(device)
 
     # create a learnable parameter for the logit scale and add it to the optimizer.
-    logit_scale = torch.nn.Parameter(torch.ones(1).to(device))
 
     optim_params = [{"params": gelsight_encoder.parameters(), "lr": resnet_lr},
                     {"params": gelsight_projection.parameters(), "lr": projection_lr},
                     {"params": vision_encoder.parameters(), "lr": resnet_lr},
-                    {"params": vision_projection.parameters(), "lr": projection_lr},
-                    {"params": logit_scale, "lr": projection_lr}]
+                    {"params": vision_projection.parameters(), "lr": projection_lr}]
 
     print('optim_params:', optim_params)
 
@@ -392,9 +445,6 @@ def clip_pretraining(train_loader: DataLoader,
             optimizer.zero_grad()
             loss.mean().backward()
             optimizer.step()
-
-            # clamp the logit scale to be between 0.05 and 100
-            logit_scale.data = torch.clamp(logit_scale.data, 0.05, 100)
 
         training_losses[epoch] = training_loss/len(train_loader)
 
@@ -476,15 +526,13 @@ def clip_pretraining(train_loader: DataLoader,
             torch.save(vision_projection.state_dict(), f'{save_dir}/epoch_{epoch}_vision_projection.pth')
             torch.save(gelsight_encoder.state_dict(), f'{save_dir}/epoch_{epoch}_gelsight_encoder.pth')
             torch.save(gelsight_projection.state_dict(), f'{save_dir}/epoch_{epoch}_gelsight_projection.pth')
-
-        print('logit_scale:', logit_scale)
    
 
 def run_clip_pretraining():
     from utils import get_norm_stats
-    num_episodes = 101
-    dataset_dir = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data"
-    save_dir = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/normalized"
+    num_episodes = 100
+    dataset_dir = "/home/aigeorge/research/TactileACT/data/camera_cage_new_fixed/data"
+    save_dir = "/home/aigeorge/research/TactileACT/data/camera_cage_new_fixed/clip_models"
     camera_names = ['1', '2', '3', '4', '5', '6']
     norm_stats = get_norm_stats(dataset_dir, num_episodes, use_existing=True)
     batch_size_train = 2
@@ -500,16 +548,14 @@ def run_clip_pretraining():
     val_indices = shuffled_indices[int(train_ratio * num_episodes):]
 
     train_dataset = ClipDataset(train_indices, dataset_dir, camera_names, norm_stats, n_images=n_clip_images, min_distance=min_distance)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=10, prefetch_factor=10, pin_memory_device='cuda')
     test_dataset = ClipDataset(val_indices, dataset_dir, camera_names, norm_stats, n_images=n_clip_images, min_distance=min_distance)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=True, pin_memory=True, num_workers=10, prefetch_factor=10, pin_memory_device='cuda')
 
-    # test the dataloader
-    for images, gelsight, position in train_dataloader:
-        print('images:', images.shape)
-        print('gelsight:', gelsight.shape)
-        print('position:', position.shape)
-        break
+    if device == torch.device("cuda"):
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=10, prefetch_factor=10, pin_memory_device='cuda')
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=True, pin_memory=True, num_workers=10, prefetch_factor=10, pin_memory_device='cuda')
+    else:
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True)
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=True)
 
     # create directory to save models and plots
     # get all folders in the clip_models directory
@@ -538,10 +584,13 @@ def run_clip_pretraining():
 
 
 def replot_loss_graph(training_losses, testing_losses):
+    """
+    Plot the training and testing losses from the saved npy files.
+    Applies a running average to smooth the losses.
+    """
     # training_losses: N X cameras
     # testing_losses: N X cameras
     from matplotlib import pyplot as plt
-    n_cameras = training_losses.shape[1]
 
     total_train = training_losses.mean(axis=1)
     total_test = testing_losses.mean(axis=1)
@@ -560,11 +609,6 @@ def replot_loss_graph(training_losses, testing_losses):
 
 
     plt.figure()
-    # for i in range(n_cameras):
-        # smoothed_train = np.convolve(training_losses[:, i], np.ones(window_size), 'valid') / window_size
-        # smoothed_test = np.convolve(testing_losses[:, i], np.ones(window_size), 'valid') / window_size
-        # plt.plot(smoothed_train, label=f'camera {i+1} train', c=f'C{i}')
-        # plt.plot(smoothed_test, label=f'camera {i+1} test', linestyle='dashed', c=f'C{i}')
     plt.plot(smooth_train, label=f'Training loss', c='r')
     plt.plot(smooth_test, label=f'Testing loss', c='b')
     plt.legend(loc='best')
@@ -575,7 +619,8 @@ def replot_loss_graph(training_losses, testing_losses):
 
 
 if __name__ == "__main__":
-    # run_clip_pretraining()
-    training_losses = np.load('/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch1450-training_losses.npy')[:1450]
-    testing_losses = np.load('/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch1450-testing_losses.npy')[:1450]
-    replot_loss_graph(training_losses, testing_losses)
+    run_clip_pretraining()
+    
+    # training_losses = np.load('/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch1450-training_losses.npy')[:1450]
+    # testing_losses = np.load('/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch1450-testing_losses.npy')[:1450]
+    # replot_loss_graph(training_losses, testing_losses)
