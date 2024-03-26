@@ -160,9 +160,6 @@ class EpisodicDataset(torch.utils.data.Dataset):
             action_len = min(episode_len - start_ts, self.chunk_size) 
             action = root['/action'][start_ts:start_ts + action_len]
 
-        # new axis for different cameras
-        # image_data = torch.stack(all_cam_images, axis=0)
-
         # normalize action and qpos
         qpos, action = self.action_qpos_normalize(qpos=qpos, action=action)
 
@@ -176,12 +173,6 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_data = torch.from_numpy(qpos).float()
         action_data = torch.from_numpy(padded_action).float()
         is_pad = torch.from_numpy(is_pad).bool()
-
-        # normalize image and change dtype to float
-
-        # if not self.use_rot:
-        #     qpos_data = torch.cat((qpos_data[:3], qpos_data[6:]))
-        #     action_data = torch.cat((action_data[:, :3], action_data[:, 6:]), dim=1)
 
         return all_cam_images, qpos_data, action_data, is_pad
     
@@ -268,9 +259,6 @@ def get_norm_stats(dataset_dir, num_episodes, use_existing=True, chunk_size = 0)
             len_episode = len(action_data_list[episode])
             for t in range(len_episode - chunk_size):
                 deltas = action_data_list[episode][t:t+chunk_size, 0:3] - qpos_data_list[episode][t][0:3]
-            # print(all_deltas[-(len_episode - chunk_size):])/
-            # for offset in range(chunk_size):
-            #     deltas = action_data_list[episode, offset:] - qpos_data_list[episode, :-offset]
                 all_deltas.append(deltas)
 
         all_deltas = np.concatenate(all_deltas, axis=0)
@@ -310,10 +298,3 @@ if __name__ == "__main__":
     num_episodes = 101
     norm_stats = get_norm_stats(dataset_dir, num_episodes, use_existing=True, chunk_size=30)
     print(norm_stats)
-    # dataset = EpisodicDataset(range(num_episodes), dataset_dir, camera_names, norm_stats, 10)
-    # dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
-    # for i, data in enumerate(dataloader):
-    #     print(data)
-    #     if i == 10:
-    #         break
-    # print("done")
