@@ -57,8 +57,6 @@ class ACTPolicy(nn.Module):
         else:
             num_backbones = len(set(cam_backbone_mapping.values()))
 
-        # if pretrained_backbones is not None:
-        #     assert len(pretrained_backbones) == num_backbones
         if pretrained_backbones is not None:
             num_backbones = len(pretrained_backbones)
 
@@ -142,13 +140,7 @@ class ACTPolicy(nn.Module):
     def __call__(self, qpos:torch.Tensor, images, actions=None, is_pad=None, z=None, ignore_latent=False):
         global debug
         env_state = None
-        # move normalize to dataloader
-        # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-        #                                  std=[0.229, 0.224, 0.225])
         if actions is not None: # training time
-            # actions = actions[:, :self.model.num_queries]
-            # is_pad = is_pad[:, :self.model.num_queries]
-
             a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, images, env_state, actions, is_pad, debug=debug.print, ignore_latent=ignore_latent)
             
             visualize_data([img[0] for img in images], qpos[0], a_hat[0], is_pad[0], actions[0])

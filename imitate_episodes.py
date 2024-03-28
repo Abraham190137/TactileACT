@@ -11,8 +11,7 @@ from einops import rearrange
 
 from utils import get_norm_stats, EpisodicDataset, EpisodicDatasetDelta # data functions
 from utils import compute_dict_mean, set_seed, detach_dict # helper functions
-from policy_action_distribution import ACTPolicy
-from visualize_episodes import save_videos
+from policy import ACTPolicy
 from visualization_utils import visualize_data, debug
 
 from typing import List, Dict, Tuple, Any

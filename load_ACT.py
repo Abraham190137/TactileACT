@@ -1,16 +1,21 @@
-from policy_action_distribution import ACTPolicy
+from policy import ACTPolicy
 import json
 import torch
 import os
 
 def load_ACT(model_path, args_file:str = None) -> ACTPolicy:
+    """
+    Load the ACT model from the checkpoint file.
+    model_path: str, path to the model checkpoint file.
+    args_file: str, path to the args.json file. If None, it will look for the args.json file in the same directory as the model_path."""
     if args_file is None:
         args_file = os.path.join(os.path.dirname(model_path), 'args.json')
     args = json.load(open(args_file, 'r'))
 
     # load pretrained backbones
     if args['backbone'] == "clip_backbone":
-        assert 'gelsight' in args['camera_names'], 'Gelsight camera not found in camera_names. Please add it to the meta_data.json file.'
+        # assert statement to check if gelsight is in camera_names. Its not necessary, but useful to double check.
+        # assert 'gelsight' in args['camera_names'], 'Gelsight camera not found in camera_names. Please add it to the meta_data.json file.'
         from clip_pretraining import modified_resnet18
         gelsight_model = modified_resnet18()
         vision_model = modified_resnet18()
@@ -46,8 +51,6 @@ def load_ACT(model_path, args_file:str = None) -> ACTPolicy:
                     camera_names = args['camera_names'],
                     z_dimension = args['z_dimension'],
                     lr = args['lr'],
-                    weight_decay = args['weight_decay'],
-                    kl_weight = args['kl_weight'],
                     pretrained_backbones = pretrained_backbones,
                     cam_backbone_mapping = camera_backbone_mapping)
     
