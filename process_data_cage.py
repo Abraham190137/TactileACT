@@ -260,12 +260,13 @@ if __name__ == "__main__":
     image_size = [400, 480]
     masks = make_masks(image_size, MASK_VERTICIES)
 
-    source_folders = ['/home/aigeorge/research/TactileACT/data/original/camara_cage_2_new_mount/',
-                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_3/',
-                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_5_crack_gel/',
-                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_6_new_gel/']
+    # source_folders = ['/home/aigeorge/research/TactileACT/data/original/camara_cage_2_new_mount/',
+    #                 '/home/aigeorge/research/TactileACT/data/original/camara_cage_3/',
+    #                 '/home/aigeorge/research/TactileACT/data/original/camara_cage_5_crack_gel/',
+    #                 '/home/aigeorge/research/TactileACT/data/original/camara_cage_6_new_gel/']
     
-    save_folder = '/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data'
+    # save_folder = '/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data'
+    save_folder = '/home/aigeorge/TactileACT/data/camera_cage_both/data'
 
     # process_folder(source_folders, save_folder, image_size, masks)
 

@@ -426,7 +426,8 @@ def clip_pretraining(train_loader: DataLoader,
     gelsight_encoder = modified_resnet18(weights=None, features_per_group=features_per_group).to(device)
 
     # create a projection head, conditioned on state
-    gelsight_projection = ClipProjectionHead(out_dim=clip_dim, conditioning_dim=state_size).to(device)
+    # gelsight_projection = ClipProjectionHead(out_dim=clip_dim, conditioning_dim=state_size).to(device)
+    gelsight_projection = ClipProjectionHead(out_dim=clip_dim).to(device)
 
     # create a learnable parameter for the logit scale and add it to the optimizer.
     # logit_scale = torch.nn.Parameter(torch.ones(1).to(device))
@@ -451,10 +452,10 @@ def clip_pretraining(train_loader: DataLoader,
         gelsight_projection.train()
         vision_encoder.train()
         vision_projection.train()
-        for batch_idx, (images, gelsight, position) in enumerate(train_loader):
+        for batch_idx, (images, gelsight, not_use_position) in enumerate(train_loader):
             images = images.to(device)
             gelsight = gelsight.to(device)
-            position = position.to(device)
+            # position = position.to(device)
 
             # forward pass
             
@@ -469,8 +470,9 @@ def clip_pretraining(train_loader: DataLoader,
 
             # flatten the batch and clip_N dimensions
             gelsight = gelsight.view(-1, gelsight.shape[2], gelsight.shape[3], gelsight.shape[4])
-            position = position.view(-1, position.shape[2])
-            gelsight_embeddings = gelsight_projection(gelsight_encoder(gelsight), position)
+            # position = position.view(-1, position.shape[2])
+            # gelsight_embeddings = gelsight_projection(gelsight_encoder(gelsight), position)
+            gelsight_embeddings = gelsight_projection(gelsight_encoder(gelsight))
 
             # reshape the gelsight_embeddings to be batch, clip_N, clip_dim
             gelsight_embeddings = gelsight_embeddings.view(batch_size, clip_N, clip_dim)
@@ -515,10 +517,10 @@ def clip_pretraining(train_loader: DataLoader,
 
         test_loss = np.zeros(n_cameras)
         with torch.no_grad():
-            for batch_idx, (images, gelsight, position) in enumerate(test_loader):
+            for batch_idx, (images, gelsight, not_use_position) in enumerate(test_loader):
                 images = images.to(device)
                 gelsight = gelsight.to(device)
-                position = position.to(device)
+                # position = position.to(device)
 
                 # forward pass
                 batch_size = images.shape[0]
@@ -532,8 +534,9 @@ def clip_pretraining(train_loader: DataLoader,
 
                 # flatten the batch and clip_N dimensions
                 gelsight = gelsight.view(-1, gelsight.shape[2], gelsight.shape[3], gelsight.shape[4])
-                position = position.view(-1, position.shape[2])
-                gelsight_embeddings = gelsight_projection(gelsight_encoder(gelsight), position)
+                # position = position.view(-1, position.shape[2])
+                # gelsight_embeddings = gelsight_projection(gelsight_encoder(gelsight), position)
+                gelsight_embeddings = gelsight_projection(gelsight_encoder(gelsight))
 
                 # reshape the gelsight_embeddings to be batch, clip_N, clip_dim
                 gelsight_embeddings = gelsight_embeddings.view(batch_size, clip_N, clip_dim)

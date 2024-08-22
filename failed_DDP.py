@@ -3,6 +3,17 @@ from torch import nn
 import torch
 from typing import Tuple, Sequence, Dict, Union, Optional, Callable, List
 from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
+from utils import get_norm_stats
+import torch.multiprocessing as mp
+
+def init_process(rank, world_size, backend='nccl'):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group(backend, rank=rank, world_size=world_size)
+
 
 def replace_submodules(
         root_module: nn.Module,
@@ -148,15 +159,16 @@ class ClipDataset(torch.utils.data.Dataset):
             assert length >= n_images*min_distance*1.4, f"To small of an episode length for the number of images and min_distance. length: {length}, n_images: {n_images}, min_distance: {min_distance}"
 
         if is_cluster:
+            print('Loading all data into memory')
             # pre-load all the data into memory
             self.episodes = {}
-            for episode_id in self.episode_ids:
+            for episode_id in tqdm(self.episode_ids):
                 dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_id}.hdf5')
                 with h5py.File(dataset_path, 'r') as root:
-                    all_cam_images = []
+                    all_cam_images_uint8 = []
                     all_gelsight_images = []
                     all_positions = []
-                    for timestep in range(self.episode_lengths[episode_id]):
+                    for timestep in range(root.attrs['num_timesteps']):
                         # get camera images
                         timestep_cam_images = []
 
@@ -164,12 +176,8 @@ class ClipDataset(torch.utils.data.Dataset):
                             image = root[f'/observations/images/{cam_name}'][timestep]
                             
                             # convert to tensor
-                            image = torch.tensor(image, dtype=torch.float32)/255.0
-                            image = torch.einsum('h w c -> c h w', image)
-
-                            # normalize image
-                            image = self.image_normalize(image)
-                            timestep_cam_images.append(image)
+                            image = torch.tensor(image, dtype=torch.uint8) # leave as uint8 for memory
+                            timestep_cam_images.append(torch.einsum('h w c -> c h w', image)) # change to c h w
 
                         images = torch.stack(timestep_cam_images, axis=0)
 
@@ -195,11 +203,11 @@ class ClipDataset(torch.utils.data.Dataset):
                         # don't include the last element, which is the gripper
                         position = torch.tensor(position[:3], dtype=torch.float32)
 
-                        all_cam_images.append(images)
+                        all_cam_images_uint8.append(images)
                         all_gelsight_images.append(gelsight_data)
                         all_positions.append(position)
                     
-                self.episodes[episode_id] = (torch.stack(all_cam_images, axis=0), torch.stack(all_gelsight_images, axis=0), torch.stack(all_positions, axis=0))
+                self.episodes[episode_id] = (torch.stack(all_cam_images_uint8, axis=0), torch.stack(all_gelsight_images, axis=0), torch.stack(all_positions, axis=0))
 
 
     def __len__(self):
@@ -220,7 +228,15 @@ class ClipDataset(torch.utils.data.Dataset):
                 timesteps.append(t)
 
         if self.is_cluster:
-            return self.episodes[self.episode_ids[index]][0][timesteps], self.episodes[self.episode_ids[index]][1][timesteps], self.episodes[self.episode_ids[index]][2][timesteps]
+            images_uint8 = self.episodes[self.episode_ids[index]][0][timesteps]
+            gelsight_images = self.episodes[self.episode_ids[index]][1][timesteps]
+            positions = self.episodes[self.episode_ids[index]][2][timesteps]
+            
+            # convert images to float and normalize
+            images = images_uint8.float()/255.0
+            images = self.image_normalize(images)
+
+            return images, gelsight_images, positions
 
         dataset_path = os.path.join(self.dataset_dir, f'episode_{self.episode_ids[index]}.hdf5')
         with h5py.File(dataset_path, 'r') as root:
@@ -386,8 +402,19 @@ def clip_loss(image_embeddings:torch.Tensor, gelsight_embeddings:torch.Tensor, t
     return loss, visualizations
 
 
+# class ClipModel(nn.Module):
+#     def __init__(self, vision_encoder:nn.Module, gelsight_encoder:nn.Module, vision_projection:nn.Module, gelsight_projection:nn.Module):
+#         super().__init__()
+#         self.vision_encoder = vision_encoder
+#         self.gelsight_encoder = gelsight_encoder
+#         self.vision_projection = vision_projection
+#         self.gelsight_projection = gelsight_projection
 
-
+#     def forward(self, vision_images:torch.Tensor, gelsight_images:torch.Tensor, position:torch.Tensor):
+#         # forward pass
+#         vision_embeddings = self.vision_projection(self.vision_encoder(vision_images))
+#         gelsight_embeddings = self.gelsight_projection(self.gelsight_encoder(gelsight_images), position)
+#         return vision_embeddings, gelsight_embeddings
 
 def clip_pretraining(train_loader: DataLoader,
                      test_loader: DataLoader,
@@ -399,7 +426,9 @@ def clip_pretraining(train_loader: DataLoader,
                      clip_dim: int = 512,
                      features_per_group: int = 16,
                      resnet_lr: float = 1e-5,
-                     projection_lr: float = 1e-4):
+                     projection_lr: float = 1e-4,
+                     rank = 0,
+                     world_size = 1):
     
     import matplotlib
     matplotlib.use('Agg')
@@ -418,15 +447,19 @@ def clip_pretraining(train_loader: DataLoader,
     # get resnet models for each camera
     # get a resnet18 model
     vision_encoder = modified_resnet18(weights=None, features_per_group=features_per_group).to(device)
+    vision_encoder = DDP(vision_encoder, device_ids=[rank])
 
     # create a projection head
     vision_projection = ClipProjectionHead(out_dim=clip_dim).to(device)
+    vision_projection = DDP(vision_projection, device_ids=[rank])
 
     # get a resnet18 model for gelsight
     gelsight_encoder = modified_resnet18(weights=None, features_per_group=features_per_group).to(device)
+    gelsight_encoder = DDP(gelsight_encoder, device_ids=[rank])
 
     # create a projection head, conditioned on state
     gelsight_projection = ClipProjectionHead(out_dim=clip_dim, conditioning_dim=state_size).to(device)
+    gelsight_projection = DDP(gelsight_projection, device_ids=[rank])
 
     # create a learnable parameter for the logit scale and add it to the optimizer.
     # logit_scale = torch.nn.Parameter(torch.ones(1).to(device))
@@ -440,6 +473,10 @@ def clip_pretraining(train_loader: DataLoader,
     print('optim_params:', optim_params)
 
     optimizer = torch.optim.Adam(optim_params)
+
+    # clip_model = ClipModel(vision_encoder, gelsight_encoder, vision_projection, gelsight_projection).to(device)
+
+    # print('did data parallel')
     
     training_losses = np.empty([n_epochs, n_cameras])
     testing_losses = np.empty([n_epochs, n_cameras])
@@ -451,10 +488,12 @@ def clip_pretraining(train_loader: DataLoader,
         gelsight_projection.train()
         vision_encoder.train()
         vision_projection.train()
+        # clip_model.train()
         for batch_idx, (images, gelsight, position) in enumerate(train_loader):
             images = images.to(device)
             gelsight = gelsight.to(device)
             position = position.to(device)
+            # print('sent to device')
 
             # forward pass
             
@@ -462,15 +501,17 @@ def clip_pretraining(train_loader: DataLoader,
             clip_N = images.shape[1]
             # images are in form batch, clip_N, camera, c, h, w. We want to flatten the batch and camera dimensions
             images = images.view(-1, images.shape[3], images.shape[4], images.shape[5])
-            image_embeddings = vision_projection(vision_encoder(images))
-            
-            # now reshape the image_embeddings to be batch, clip_N, camera, clip_dim
-            image_embeddings = image_embeddings.view(batch_size, clip_N, n_cameras, clip_dim)
 
             # flatten the batch and clip_N dimensions
             gelsight = gelsight.view(-1, gelsight.shape[2], gelsight.shape[3], gelsight.shape[4])
             position = position.view(-1, position.shape[2])
+
+            # image_embeddings, gelsight_embeddings = clip_model(images, gelsight, position)
+            image_embeddings = vision_projection(vision_encoder(images))
             gelsight_embeddings = gelsight_projection(gelsight_encoder(gelsight), position)
+            
+            # now reshape the image_embeddings to be batch, clip_N, camera, clip_dim
+            image_embeddings = image_embeddings.view(batch_size, clip_N, n_cameras, clip_dim)
 
             # reshape the gelsight_embeddings to be batch, clip_N, clip_dim
             gelsight_embeddings = gelsight_embeddings.view(batch_size, clip_N, clip_dim)
@@ -479,12 +520,12 @@ def clip_pretraining(train_loader: DataLoader,
             target_matrix = torch.eye(clip_N).to(device)
 
             # calculate loss - vector of per-camera losses
-            if batch_idx == 0 and epoch%plot_freq == 0: # visualize the first batch in each epoch
-                loss, plot_maps = clip_loss(image_embeddings, gelsight_embeddings, target_matrix, visualize=True)
+            if batch_idx == 0 and epoch%plot_freq == 0 and epoch%world_size==rank: # visualize the first batch in each epoch
+                loss, clip_maps = clip_loss(image_embeddings, gelsight_embeddings, target_matrix, visualize=True)
                 try:
-                    for cam_num, plot_map in enumerate(plot_maps):
+                    for cam_num, clip_map in enumerate(clip_maps):
                         plt.figure()
-                        plt.imshow(plot_map)
+                        plt.imshow(clip_map)
                         plt.colorbar()
                         plt.title(f'Average Softmax Map, Epoch {epoch}, Cam {cam_num} - Train')
                         plt.savefig(f'{save_dir}/graphs/epoch_{epoch}_cam_{cam_num}_train.png')
@@ -512,6 +553,7 @@ def clip_pretraining(train_loader: DataLoader,
         gelsight_projection.eval()
         vision_encoder.eval()
         vision_projection.eval()
+        # clip_model.eval()
 
         test_loss = np.zeros(n_cameras)
         with torch.no_grad():
@@ -525,15 +567,19 @@ def clip_pretraining(train_loader: DataLoader,
                 clip_N = images.shape[1]
                 # images are in form batch, clip_N, camera, c, h, w. We want to flatten the batch and camera dimensions
                 images = images.view(-1, images.shape[3], images.shape[4], images.shape[5])
-                image_embeddings = vision_projection(vision_encoder(images))
-                
-                # now reshape the image_embeddings to be batch, clip_N, camera, clip_dim
-                image_embeddings = image_embeddings.view(batch_size, clip_N, n_cameras, clip_dim)
 
                 # flatten the batch and clip_N dimensions
                 gelsight = gelsight.view(-1, gelsight.shape[2], gelsight.shape[3], gelsight.shape[4])
                 position = position.view(-1, position.shape[2])
+
+                # image_embeddings, gelsight_embeddings = clip_model(images, gelsight, position)
+                image_embeddings = vision_projection(vision_encoder(images))
                 gelsight_embeddings = gelsight_projection(gelsight_encoder(gelsight), position)
+                
+                # now reshape the image_embeddings to be batch, clip_N, camera, clip_dim
+                image_embeddings = image_embeddings.view(batch_size, clip_N, n_cameras, clip_dim)
+
+                
 
                 # reshape the gelsight_embeddings to be batch, clip_N, clip_dim
                 gelsight_embeddings = gelsight_embeddings.view(batch_size, clip_N, clip_dim)
@@ -543,12 +589,12 @@ def clip_pretraining(train_loader: DataLoader,
 
                 # calculate loss - vector of per-camera losses
                             # calculate loss - vector of per-camera losses
-                if batch_idx == 0 and epoch%plot_freq == 0: # visualize the first batch in each epoch
-                    loss, plot_maps = clip_loss(image_embeddings, gelsight_embeddings, target_matrix, visualize=True)
+                if batch_idx == 0 and epoch%plot_freq == 0 and epoch%world_size==rank: # visualize the first batch in each epoch
+                    loss, avg_softmax_maps = clip_loss(image_embeddings, gelsight_embeddings, target_matrix, visualize=True)
                     try:
-                        for cam_num, plot_map in enumerate(plot_maps):
+                        for cam_num, softmax_map in enumerate(avg_softmax_maps):
                             plt.figure()
-                            plt.imshow(plot_map)
+                            plt.imshow(softmax_map)
                             plt.colorbar()
                             plt.title(f'Average Softmax Map, Epoch {epoch}, Cam {cam_num} - Test')
                             plt.savefig(f'{save_dir}/graphs/epoch_{epoch}_cam_{cam_num}_test.png')
@@ -563,7 +609,7 @@ def clip_pretraining(train_loader: DataLoader,
 
 
         # plot the training and testing losses
-        if epoch%plot_freq == 0:
+        if epoch%plot_freq == 0 and rank==0:
             plt.figure()
             for i in range(n_cameras):
                 plt.plot(training_losses[:epoch+1, i], label=f'camera {i+1} train', c=f'C{i}')
@@ -576,11 +622,12 @@ def clip_pretraining(train_loader: DataLoader,
             plt.close()
 
         # save the losses as a np file
-        np.save(f'{save_dir}/graphs/training_losses.npy', training_losses)
-        np.save(f'{save_dir}/graphs/testing_losses.npy', testing_losses)
+        if epoch%world_size==rank:
+            np.save(f'{save_dir}/graphs/{epoch}training_losses.npy', training_losses)
+            np.save(f'{save_dir}/graphs/{epoch}testing_losses.npy', testing_losses)
 
         # save the models
-        if (epoch+1) % save_freq == 0:
+        if (epoch+1) % save_freq == 0 and epoch%world_size==rank:
             torch.save(vision_encoder.state_dict(), f'{save_dir}/epoch_{epoch}_vision_encoder.pth')
             torch.save(vision_projection.state_dict(), f'{save_dir}/epoch_{epoch}_vision_projection.pth')
             torch.save(gelsight_encoder.state_dict(), f'{save_dir}/epoch_{epoch}_gelsight_encoder.pth')
@@ -589,18 +636,19 @@ def clip_pretraining(train_loader: DataLoader,
         # print('logit_scale:', logit_scale)
    
 
-def run_clip_pretraining():
-    from utils import get_norm_stats
+def run_clip_pretraining(rank, work_size):
+    init_process(rank, work_size)
     num_episodes = 102
     dataset_dir = "data/camera_cage_not_fixed/data"
     save_dir = "data/camera_cage_not_fixed/clip_models/"
     camera_names = ['1', '2', '3', '4', '5', '6']
     norm_stats = get_norm_stats(dataset_dir, num_episodes, use_existing=True)
-    batch_size_train = 3
-    batch_size_test = 3
-    n_clip_images = 5
+    batch_size_train = 1
+    batch_size_test = 1
+    n_clip_images = 2
     min_distance = 20
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = rank
 
     # obtain train test split
     train_ratio = 0.8
@@ -608,10 +656,12 @@ def run_clip_pretraining():
     train_indices = shuffled_indices[:int(train_ratio * num_episodes)]
     val_indices = shuffled_indices[int(train_ratio * num_episodes):]
 
-    train_dataset = ClipDataset(train_indices, dataset_dir, camera_names, norm_stats, n_images=n_clip_images, min_distance=min_distance)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=10, prefetch_factor=10)#, pin_memory_device='cuda')
-    test_dataset = ClipDataset(val_indices, dataset_dir, camera_names, norm_stats, n_images=n_clip_images, min_distance=min_distance)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=True, pin_memory=True, num_workers=10, prefetch_factor=10)#, pin_memory_device='cuda')
+    train_dataset = ClipDataset(train_indices, dataset_dir, camera_names, norm_stats, n_images=n_clip_images, min_distance=min_distance, is_cluster=False)
+    train_sampler = DistributedSampler(train_dataset)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=batch_size_train, shuffle=False, pin_memory=True, num_workers=1, prefetch_factor=1)#, pin_memory_device='cuda')
+    test_dataset = ClipDataset(val_indices, dataset_dir, camera_names, norm_stats, n_images=n_clip_images, min_distance=min_distance, is_cluster=False)
+    test_sampler = DistributedSampler(test_dataset)
+    test_dataloader = DataLoader(test_dataset, sampler=test_sampler, batch_size=batch_size_test, shuffle=False, pin_memory=True, num_workers=1, prefetch_factor=1)#, pin_memory_device='cuda')
 
     # test the dataloader
     for images, gelsight, position in train_dataloader:
@@ -643,7 +693,7 @@ def run_clip_pretraining():
         f.write(f'train_indices: {train_indices}\n')
         f.write(f'val_indices: {val_indices}\n')
         
-    clip_pretraining(train_dataloader, test_dataloader, device, save_dir=f'{save_dir}/{n}', clip_dim=512, features_per_group=16, n_epochs=1501)
+    clip_pretraining(train_dataloader, test_dataloader, device, save_dir=f'{save_dir}/{n}', clip_dim=512, features_per_group=16, n_epochs=1501, rank=rank, work_size=work_size)
 
 
 def replot_loss_graph(training_losses, testing_losses):
@@ -682,9 +732,10 @@ def replot_loss_graph(training_losses, testing_losses):
     plt.ylabel('Loss')
     plt.show()
 
-
 if __name__ == "__main__":
-    run_clip_pretraining()
+    world_size = 8
+    mp.spawn(run_clip_pretraining, args=(world_size,), nprocs=world_size, join=True)
+    # run_clip_pretraining()
     # training_losses = np.load('/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch1450-training_losses.npy')[:1450]
     # testing_losses = np.load('/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch1450-testing_losses.npy')[:1450]
     # replot_loss_graph(training_losses, testing_losses)

@@ -163,9 +163,14 @@ def visualize_data(image_data, qpos_data, action_pred_data, is_pad_data, action_
     fig = plt.figure(figsize=(10, 10), layout='tight')
     subfigs = fig.subfigures(1, 2, wspace=0.07)
 
-    axs_left = subfigs[0].subplots(len(images), 1)
-    for i, image in enumerate(images):
-        axs_left[i].imshow(image.transpose(1, 2, 0))     
+    if len(images) > 1:
+        axs_left = subfigs[0].subplots(len(images), 1)
+        for i, image in enumerate(images):
+            axs_left[i].imshow(image.transpose(1, 2, 0))     
+    elif len(images) == 1:
+        subfigs[0].add_subplot(111).imshow(images[0].transpose(1, 2, 0))
+    else:
+        pass
 
     # Make a 3D scatter plot of the actions in the right subplot. Use cmaps to color the points based on the index
     c = np.arange(len(actions_pred))

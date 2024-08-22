@@ -27,6 +27,7 @@ import cv2
 from visualization_utils import visualise_trajectory, z_slider
 
 DT = 0.01 # need to hardcode, used to be in constants.py
+FREEZE_TACTILE = True
 
 def main(args):
 
@@ -90,7 +91,7 @@ def main(args):
 
     # load pretrained backbones
     if args['backbone'] == "clip_backbone":
-        assert 'gelsight' in camera_names, 'Gelsight camera not found in camera_names. Please add it to the meta_data.json file.'
+        # assert 'gelsight' in camera_names, 'Gelsight camera not found in camera_names. Please add it to the meta_data.json file.'
         from clip_pretraining import modified_resnet18
         gelsight_model = modified_resnet18()
         vision_model = modified_resnet18()
@@ -104,6 +105,9 @@ def main(args):
         elif args['gelsight_backbone_path'] != 'none' or args['vision_backbone_path'] != 'none':
             raise ValueError('Both vision and gelsight backbones must be specified if one is specified.')
         
+        if FREEZE_TACTILE:
+            gelsight_model.requires_grad_(False)
+            print("Freezing tactile backbone")
         pretrained_backbones = [vision_model, gelsight_model]
     else:
         if args['gelsight_backbone_path'] != 'none' or args['vision_backbone_path'] != 'none':
@@ -210,8 +214,8 @@ def main(args):
     # construct dataset and dataloader
     train_dataset = EpisodicDatasetDelta(train_indices, dataset_dir, camera_names, norm_stats, chunk_size=chunk_size)
     val_dataset = EpisodicDatasetDelta(val_indices, dataset_dir, camera_names, norm_stats, chunk_size=chunk_size)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=8, prefetch_factor=8)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=8, prefetch_factor=8)
 
     debug.action_qpos_normalizer = train_dataset.action_qpos_normalize
 
