@@ -2,6 +2,11 @@ import h5py
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+"""
+This file contains helper functions to inspect the contents of an HDF5 file.
+"""
 
 def visualize_gelsight_data(image):
 	# Convert the image to LAB color space
@@ -57,24 +62,28 @@ def show_images_in_hdf5_file(filename):
             cv2.waitKey(0)
         cv2.waitKey(0)
 
-def save_images_in_hdf5_file(filename, save_folder):
-    print('saving images in', filename)
-    with h5py.File(filename, 'r') as f:
-        for idx in range(f.attrs['num_timesteps']):
+def save_images_from_hdf5_file(source_file, save_folder):
+    """
+    Save the images and gelsight data from the HDF5 file to the save folder.
+    Useful for making graphics and visualizations.
+    """
+    with h5py.File(source_file, 'r') as f:
+        for idx in tqdm(range(f.attrs['num_timesteps'])):
             print(idx)
+            # tile the images (2x3) plus gelsight
             for i, key in enumerate(f['observations/images'].keys()):
                 image_data = f['observations/images'][key][idx, :, :, :]
-                cv2.imwrite(os.path.join(save_folder, f"{key}_{idx}.png"), image_data)
+                cv2.imwrite(f'{save_folder}/{idx}_{key}.png', image_data)
+            
             gelsight_data = f['observations/gelsight/depth_strain_image'][idx, :, :, :]
             gelsight_data = visualize_gelsight_data(gelsight_data)*255
-            cv2.imwrite(os.path.join(save_folder, f"gelsight_{idx}.png"), gelsight_data)
+            cv2.imwrite(f'{save_folder}/{idx}_gelsight.png', gelsight_data)    
 
 
+import os
 if __name__ == "__main__":
-    # filename = "/home/aigeorge/research/TactileACT/data/camera_cage/data/episode_0.hdf5"
-    # filename = "/home/aigeorge/research/TactileACT/test.hdf5"
-    # print_hdf5_file(filename)
-    import os
+    filename = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data/episode_55.hdf5"
+
     folder = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data"
     images_folder = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/images"
     # all_files = []
@@ -85,8 +94,7 @@ if __name__ == "__main__":
 
     for episode_num in [0, 1, 2]:
         filename = os.path.join(folder, f"episode_{episode_num}.hdf5")
-        # touch_coefficent(os.path.join(folder, filename))
-        # exit()
+        print_hdf5_file(os.path.join(folder, filename))
         save_images_in_hdf5_file(os.path.join(folder, filename), os.path.join(images_folder, str(episode_num)))
     exit()
     with h5py.File(filename, 'r') as f:           

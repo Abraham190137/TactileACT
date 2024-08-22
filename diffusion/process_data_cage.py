@@ -130,7 +130,91 @@ def uncompress_data(source_folder, save_path, image_size = [400, 480], masks: Di
                 # save the images in the hdf5 file
                 image_group.create_dataset(name=f'{cam_name}', dtype='uint8', 
                                         chunks=(1, image_size[0], image_size[1], 3),
-                                        data=images[:-gelsight_delay])       
+                                        data=images[:-gelsight_delay])
+                
+            
+        
+
+
+
+    
+    # # Copy the hdf5 file to the save_path
+    # shutil.copy(os.path.join(source_folder, h5py_files[0]), save_path)
+
+    # # Open the hdf5 file
+    # with h5py.File(save_path, 'a') as hdf5_file:
+
+    #     # rename the datasets to be in the format that the ACT dataloader expects
+    #     if 'observations/position' in hdf5_file:
+    #         hdf5_file.move('observations/position', 'observations/qpos')
+    #     else:
+    #         print(f'No position dataset in file {file}')
+    #     if 'observations/velocity' in hdf5_file:
+    #         hdf5_file.move('observations/velocity', 'observations/qvel')
+    #     else:
+    #         print(f'No velocity dataset in file {file}')
+    #     if '/goal_position' in hdf5_file:
+    #         hdf5_file.move('/goal_position', '/action')
+
+    #     # if the data is not using rotation, removed 3:6 from qpos, action, and qvel
+    #     if not use_rot:
+    #         for key in ['observations/qpos', 'observations/qvel', 'action']:
+    #             data = hdf5_file[key][()]
+    #             # print("before delte:", data.shape)
+    #             data = np.delete(data, [3, 4, 5], axis=1)
+    #             # print("after delte:", data.shape)
+    #             del hdf5_file[key]
+    #             hdf5_file.create_dataset(name=key, data=data, chunks=(1, data.shape[1]))
+            
+    #         # change position_dim and velocity_dim attrs to 4
+    #         hdf5_file.attrs['position_dim'] = 4
+    #         hdf5_file.attrs['velocity_dim'] = 4
+
+    #     # delete image_sizes atribute:
+    #     del hdf5_file.attrs['image_sizes']
+
+    #     # save the image height and width
+    #     hdf5_file.attrs['image_height'] = image_size[0]
+    #     hdf5_file.attrs['image_width'] = image_size[1]
+
+    #     cam_names = hdf5_file.attrs['camera_names']
+    #     # save each camera image
+    #     for cam_name in cam_names:
+    #         # open the video file
+    #         video_path = os.path.join(source_folder, f'cam-{cam_name}.avi')
+    #         cap = cv2.VideoCapture(video_path)
+    #         # get the number of frames
+    #         num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    #         assert num_frames == hdf5_file.attrs['num_timesteps'], f"Number of frames in video {num_frames} does not match number of timesteps in hdf5 file {hdf5_file.attrs['num_timesteps']}"
+
+    #         crop = CROP_PARAMS[int(cam_name)]
+    #         images = np.empty((num_frames, image_size[0], image_size[1], 3), dtype=np.uint8)
+
+    #         # loop through the frames and save them in the hdf5 file
+    #         for i in range(num_frames):
+    #             ret, frame = cap.read()
+    #             # crop the frame
+    #             frame = frame[crop['i']:crop['i']+crop['h'], crop['j']:crop['j']+crop['w']]
+    #             # resize the frame and save
+    #             frame = cv2.resize(frame, (image_size[1], image_size[0]))
+    #             # apply the mask 
+    #             if int(cam_name) in masks and masks[int(cam_name)] is not None:
+    #                 frame = cv2.bitwise_and(frame, frame, mask=masks[int(cam_name)])
+    #             images[i] = frame
+
+    #         cap.release()
+            
+    #         # save the images in the hdf5 file
+    #         hdf5_file.create_dataset(name=f'observations/images/{cam_name}', 
+    #                                  dtype='uint8', 
+    #                                  chunks=(1, image_size[0], image_size[1], 3),
+    #                                  data=images)
+            
+        # # there is a dely in the gelsight video, so we will resave the gelsight images earlier in the hdf5 file
+        # hdf5_file['observations/gelsight/depth_strain_image'][()] = hdf5_file['observations/gelsight/depth_strain_image'][gelsight_delay:]
+        # hdf5_file['observations/gelsight/marker_data'][()] = hdf5_file['observations/gelsight/marker_data'][gelsight_delay:]
+        # hdf5_file['observations/gelsight/raw_image'][()] = hdf5_file['observations/gelsight/raw_image'][gelsight_delay:]
+        
 
             
 def process_folder(source_folders, save_folder, image_size = [400, 480], masks = {}):
@@ -153,7 +237,7 @@ def process_folder(source_folders, save_folder, image_size = [400, 480], masks =
     with Pool() as p:
         p.starmap(uncompress_data, zip(episode_folders, save_paths, [image_size]*len(save_paths), [masks]*len(save_paths)))
 
-def save_norm_stats(save_folder, num_episodes = None):
+def save_norm_stats(save_folder):
     # get the number of episodes
     # find all the episodes in the source folder recursively
     h5py_files = []
@@ -162,8 +246,7 @@ def save_norm_stats(save_folder, num_episodes = None):
             if file.endswith('.hdf5'):
                 h5py_files.append(os.path.join(root, file))
 
-    if num_episodes is None:
-        num_episodes = len(h5py_files)
+    num_episodes = len(h5py_files)
 
     # get norm stats and save them
     gelsight_mean, gelsight_std = gelsight_norm_stats(save_folder, num_episodes)
@@ -177,17 +260,16 @@ if __name__ == "__main__":
     image_size = [400, 480]
     masks = make_masks(image_size, MASK_VERTICIES)
 
-    # source_folders = ['/home/aigeorge/research/TactileACT/data/original/camara_cage_2_new_mount/',
-    #                 '/home/aigeorge/research/TactileACT/data/original/camara_cage_3/',
-    #                 '/home/aigeorge/research/TactileACT/data/original/camara_cage_5_crack_gel/',
-    #                 '/home/aigeorge/research/TactileACT/data/original/camara_cage_6_new_gel/']
+    source_folders = ['/home/aigeorge/research/TactileACT/data/original/camara_cage_2_new_mount/',
+                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_3/',
+                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_5_crack_gel/',
+                    '/home/aigeorge/research/TactileACT/data/original/camara_cage_6_new_gel/']
     
-    # save_folder = '/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data'
-    save_folder = '/home/aigeorge/TactileACT/data/camera_cage_both/data'
+    save_folder = '/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data'
 
     # process_folder(source_folders, save_folder, image_size, masks)
 
-    save_norm_stats(save_folder, 100)
+    save_norm_stats(save_folder)
 
     # source_file = '/home/aigeorge/research/TactileACT/data/original/camara_cage_1/run_0/episode_3'
     # save_file = '/home/aigeorge/research/TactileACT/test.hdf5'

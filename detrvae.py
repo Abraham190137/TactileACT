@@ -52,10 +52,7 @@ class DETRVAE(nn.Module):
         if backbones is not None:
             self.input_proj = nn.Conv2d(backbones[0].num_channels, hidden_dim, kernel_size=1)
             self.backbones = nn.ModuleList(backbones)
-###            # self.input_proj_robot_state = nn.Linear(14, hidden_dim)
         else:
-            # input_dim = 14 + 7 # robot_state + env_state
-###            # self.input_proj_robot_state = nn.Linear(14, hidden_dim)
             self.input_proj_env_state = nn.Linear(7, hidden_dim)
             self.pos = torch.nn.Embedding(2, hidden_dim)
             self.backbones = None
@@ -68,8 +65,6 @@ class DETRVAE(nn.Module):
         self.latent_dim = z_dimension # final size of latent z
         print("z dimension: ", self.latent_dim)
         self.cls_embed = nn.Embedding(1, hidden_dim) # extra cls token embedding
-###        # self.encoder_action_proj = nn.Linear(14, hidden_dim) # project action to embedding
-###        # self.encoder_joint_proj = nn.Linear(14, hidden_dim)  # project qpos to embedding
         self.encoder_action_proj = nn.Linear(state_dim, hidden_dim) # project action to embedding
         self.encoder_joint_proj = nn.Linear(state_dim, hidden_dim)  # project qpos to embedding
         self.latent_proj = nn.Linear(hidden_dim, self.latent_dim*2) # project hidden state to latent std, var
@@ -79,8 +74,6 @@ class DETRVAE(nn.Module):
         self.latent_out_proj = nn.Linear(self.latent_dim, hidden_dim) # project latent sample to embedding
         self.additional_pos_embed = nn.Embedding(2, hidden_dim) # learned position embedding for proprio and latent
 
-        # # additional stuff I did # TODO: Remove
-        # self.latent_out_proj2 = nn.Linear(self.latent_dim, num_queries*state_dim) # project latent sample to num_queries, for action prediction
 
     def forward(self, qpos, images, env_state, actions=None, is_pad=None, z=None, debug=False, ignore_latent=False) ->  Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -115,11 +108,8 @@ class DETRVAE(nn.Module):
             mu = latent_info[:, :self.latent_dim]
             logvar = latent_info[:, self.latent_dim:]
             latent_sample = reparametrize(mu, logvar)
-            # print('\nmu: ', mu[0].item())
-            # print('logvar: ', logvar[0].item())
-            # print('latent_sample: ', latent_sample[0].item())
             latent_input = self.latent_out_proj(latent_sample)
-            # my_weird_latent_thing = self.latent_out_proj2(latent_sample)
+
         else:
             mu = logvar = None
             if z is None: # inference time
@@ -147,41 +137,24 @@ class DETRVAE(nn.Module):
                     print('features shape', features[0].shape)
                     print('pos shape', pos[0].shape)
                     print('processed features shape', self.input_proj(features[0]).shape)
-                # features, pos = self.backbones[cam_id](image[:, cam_id])
+
                 features = features[0] # take the last layer feature
                 pos = pos[0]
                 all_cam_features.append(self.input_proj(features).flatten(2))
                 all_cam_pos.append(pos.flatten(2))
-            # proprioception features
-            # print('qpos', qpos.shape, qpos)
+
                 
             proprio_input = self.input_proj_robot_state(qpos)
             # fold camera dimension into width dimension
+
             src = torch.cat(all_cam_features, axis=2)
             pos = torch.cat(all_cam_pos, axis=2)
 
-            # delete the images. Purely an autoencoder now:
-            # src = torch.zeros_like(src)
-            # pos = torch.zeros_like(pos)
+
             if debug:
                 print('latent input shape', latent_input.shape)
                 print('proprio input shape', proprio_input.shape)
                 print('additional_pos_embed shape', self.additional_pos_embed.weight.shape)
-            
-            # print('weird thing shape', my_weird_latent_thing.shape)
-            
-            # decoder_init = my_weird_latent_thing.reshape(bs, self.num_queries, -1).repeat(1, 1, self.hidden_dim//self.state_dim) # repeat the latent sample to num_queries
-            # if self.hidden_dim%self.state_dim != 0: # need to pad
-            #     decorder_padding = torch.zeros([bs, self.num_queries, self.hidden_dim%self.state_dim], dtype=torch.float32).to(qpos.device)
-            #     decoder_init = torch.cat([decoder_init, decorder_padding], axis=2)
-            
-            # # change shape from bs, seq, dim to seq, bs, dim
-            # decoder_init = decoder_init.permute(1, 0, 2)
-            # import matplotlib.pyplot as plt
-            # plt.figure()
-            # plt.imshow(decoder_init[:, 0, :].detach().cpu().numpy())
-            # plt.show()
-            # decoder_init = latent_input.unsqueeze(0).repeat(self.num_queries, 1, 1) + self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
 
             hs = self.transformer(src, None, self.query_embed.weight, pos, latent_input, proprio_input, self.additional_pos_embed.weight, debug=debug)#, tgt=decoder_init)
             if debug:

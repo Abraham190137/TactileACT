@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import os
 import h5py
-from torch.utils.data import TensorDataset, DataLoader
+#from torch.utils.data import TensorDataset, DataLoader
 import cv2
 from torchvision import transforms
 from tqdm import tqdm
@@ -22,18 +22,6 @@ class NormalizeActionQpos:
         qpos = (qpos - self.mean) / self.std
         action = (action - self.mean) / self.std
         return qpos, action
-    
-    def normalize_qpos(self, qpos):
-        return (qpos - self.mean) / self.std
-    
-    def normalize_action(self, action):
-        return (action - self.mean) / self.std
-    
-    def unnormalize_qpos(self, qpos):
-        return qpos * self.std + self.mean
-    
-    def unnormalize_action(self, action):
-        return action * self.std + self.mean
     
     def unnormalize(self, qpos, action):
         new_qpos = qpos * self.std + self.mean
@@ -55,15 +43,6 @@ class NormalizeDeltaActionQpos:
         qpos = (qpos - self.qpos_mean) / self.qpos_std
         delta = (delta - self.delta_mean) / self.delta_std
         return qpos, delta
-    
-    def normalize_qpos(self, qpos):
-        return (qpos - self.qpos_mean) / self.qpos_std
-    
-    def unnormalize_qpos(self, normalized_qpos):
-        return normalized_qpos * self.qpos_std + self.qpos_mean
-    
-    def unnormalize_delta(self, normalized_delta):
-        return normalized_delta * self.delta_std + self.delta_mean
     
     def unnormalize(self, normalized_qpos, normalized_delta):
         qpos = normalized_qpos * self.qpos_std + self.qpos_mean
@@ -125,7 +104,6 @@ class EpisodicDataset(torch.utils.data.Dataset):
             for cam_name in self.camera_names:
                 # seperate processing for gelsight:
                 if cam_name == 'gelsight':
-                    size = (root.attrs['gelsight_height'], root.attrs['gelsight_width'])
                     gelsight_data = root['observations/gelsight/depth_strain_image'][start_ts]
                     # gelsight_data = cv2.resize(gelsight_data, (self.image_size[1], self.image_size[0]))
                     # adjust gelsight data using the mean and std
@@ -134,18 +112,11 @@ class EpisodicDataset(torch.utils.data.Dataset):
                     gelsight_data = torch.einsum('h w c -> c h w', gelsight_data) # change to c h w
                     all_cam_images.append(gelsight_data)
                 
-                elif cam_name == "blank":
-                    image = np.zeros((self.image_size[0], self.image_size[1], 3), dtype=np.float32)
-                    image = torch.tensor(image, dtype=torch.float32)
-                    image = torch.einsum('h w c -> c h w', image)
-                    all_cam_images.append(image)
-
                 else:
                     image = root[f'/observations/images/{cam_name}'][start_ts]
                     # resize image
                     if self.image_size != image.shape[:2]:
                         print('reshaping image')
-                        raise ValueError('Image size does not match the specified image size')
                         image = cv2.resize(image, (self.image_size[1], self.image_size[0]))
 
                     # normalize image
@@ -155,10 +126,12 @@ class EpisodicDataset(torch.utils.data.Dataset):
                     all_cam_images.append(image)
 
 
-
             # get all actions after and including start_ts, with the max length of chunk_size
             action_len = min(episode_len - start_ts, self.chunk_size) 
             action = root['/action'][start_ts:start_ts + action_len]
+
+        # new axis for different cameras
+        # image_data = torch.stack(all_cam_images, axis=0)
 
         # normalize action and qpos
         qpos, action = self.action_qpos_normalize(qpos=qpos, action=action)
@@ -173,6 +146,12 @@ class EpisodicDataset(torch.utils.data.Dataset):
         qpos_data = torch.from_numpy(qpos).float()
         action_data = torch.from_numpy(padded_action).float()
         is_pad = torch.from_numpy(is_pad).bool()
+
+        # normalize image and change dtype to float
+
+        # if not self.use_rot:
+        #     qpos_data = torch.cat((qpos_data[:3], qpos_data[6:]))
+        #     action_data = torch.cat((action_data[:, :3], action_data[:, 6:]), dim=1)
 
         return all_cam_images, qpos_data, action_data, is_pad
     
@@ -231,12 +210,27 @@ def get_norm_stats(dataset_dir, num_episodes, use_existing=True, chunk_size = 0)
     action_std = all_action_data.std(axis=0)
     action_std = np.clip(action_std, 1e-2, np.inf) # clipping
 
+
+    action_min = all_action_data.min(axis=0) 
+    action_max = all_action_data.max(axis=0)
+    #actual gripper minmax
+    action_min[3] = 0.0 
+    action_max[3] = 0.08
+
     # get mean of the qpos data
     qpos_mean = all_qpos_data.mean(axis=0)
     qpos_std = all_qpos_data.std(axis=0)
     qpos_std = np.clip(qpos_std, 1e-2, np.inf) # clipping
 
-    stats = {"action_mean": action_mean, "action_std": action_std,
+    qpos_min = all_qpos_data.min(axis=0)
+    qpos_max = all_qpos_data.max(axis=0)
+    #actual gripper minmax
+    qpos_min[3] = 0.0
+    qpos_max[3] = 0.08
+
+    stats = {"action_mean": action_mean, "action_std": action_std, "action_min":action_min, 
+             "action_max":action_max,
+             "qpos_min":qpos_min, "qpos_max":qpos_max,
             "qpos_mean": qpos_mean, "qpos_std": qpos_std}
 
     # check to see if norm stats already exists
@@ -259,6 +253,9 @@ def get_norm_stats(dataset_dir, num_episodes, use_existing=True, chunk_size = 0)
             len_episode = len(action_data_list[episode])
             for t in range(len_episode - chunk_size):
                 deltas = action_data_list[episode][t:t+chunk_size, 0:3] - qpos_data_list[episode][t][0:3]
+            # print(all_deltas[-(len_episode - chunk_size):])/
+            # for offset in range(chunk_size):
+            #     deltas = action_data_list[episode, offset:] - qpos_data_list[episode, :-offset]
                 all_deltas.append(deltas)
 
         all_deltas = np.concatenate(all_deltas, axis=0)
@@ -298,3 +295,10 @@ if __name__ == "__main__":
     num_episodes = 101
     norm_stats = get_norm_stats(dataset_dir, num_episodes, use_existing=True, chunk_size=30)
     print(norm_stats)
+    # dataset = EpisodicDataset(range(num_episodes), dataset_dir, camera_names, norm_stats, 10)
+    # dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+    # for i, data in enumerate(dataloader):
+    #     print(data)
+    #     if i == 10:
+    #         break
+    # print("done")

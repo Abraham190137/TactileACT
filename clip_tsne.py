@@ -9,22 +9,34 @@ import h5py
 from tqdm import tqdm
 from typing import List
 
+"""
+This file is used to visualize the latent vectors of the images and gelsight 
+data using t-SNE. Its useful to see how well the pre-training works.
+"""
+
 def plot_tsne(all_image_vectors:np.ndarray, gelsight_vectors:np.ndarray, timestamps):
-    # all_image_vectors: (n_cam, episode_len, 512)
+    """
+    Plots the t-SNE visualization of the latent vectors of the images and gelsight data.
+    all_image_vectors: np.ndarray of shape (n_cam, episode_len, 512). The latent vectors of the images.
+    gelsight_vectors: np.ndarray of shape (episode_len, 512). The latent vectors of the gelsight data.
+    timestamps: np.ndarray of shape (episode_len). The timestamps of the data.
+    """
     n_cam = all_image_vectors.shape[0]
     episode_len = len(timestamps)
-    tsne = TSNE(n_components=2, random_state=10)
+    tsne = TSNE(n_components=2, random_state=10) # create TSNE object
 
-    print(all_image_vectors[0].shape)
-    print(gelsight_vectors.shape)
 
+    # concatenate all the latent vectors, including the gelsight vectors
     all_latent_vectors = np.concatenate([all_image_vectors[i] for i in range(n_cam)] + [gelsight_vectors], axis=0)
-    print(all_latent_vectors.shape)
 
+    # fit the t-SNE model to the latent vectors
     embedded = tsne.fit_transform(all_latent_vectors)
+
+    # get the image and gelsight TSNE embeddings
     image_embedings = [embedded[i*episode_len:(i+1)*episode_len] for i in range(n_cam)]
     gelsight_embedded = embedded[n_cam*episode_len:]
 
+    # plot the t-SNE embeddings, use color to represent the timestamps
     plt.figure(figsize=(8, 5))
     markers = ['o', 's', '*', 'D', 'P', 'H']
     for i, image_embedded in enumerate(image_embedings):
@@ -41,45 +53,19 @@ def plot_tsne(all_image_vectors:np.ndarray, gelsight_vectors:np.ndarray, timesta
     plt.tight_layout() 
 
 
-import cv2
-def visualize_gelsight_data(image):
-	# Convert the image to LAB color space
-	max_depth = 10
-	max_strain = 30
-	# Show all three using LAB color space
-	image[0] = np.clip(100*np.maximum(image[0], 0)/max_depth, 0, 100)
-	# normalized_depth = np.clip(100*(depth_image/depth_image.max()), 0, 100)
-	image[1:] = np.clip(128*(image[1:]/max_strain), -128, 127)
-	return cv2.cvtColor(image, cv2.COLOR_LAB2BGR)
-
-def show_scene(data_file, timestep) -> None:
-    print('showing images in', data_file, 'at timestep', timestep)
-    with h5py.File(data_file, 'r') as f:
-        # tile the images (2x3) plus gelsight
-        image_size = (f.attrs['image_height'], f.attrs['image_width'])
-        gelsight_size = (f.attrs['gelsight_height'], f.attrs['gelsight_width'])
-        grid = np.zeros([2*image_size[0] + gelsight_size[0], 3*image_size[1], 3], dtype=np.uint8)
-        for i, key in enumerate(f['observations/images'].keys()):
-            image_data = f['observations/images'][key][timestep, :, :, :]
-            grid[(i//3)*image_size[0]:(i//3+1)*image_size[0], (i%3)*image_size[1]:(i%3+1)*image_size[1], :] = image_data
-        gelsight_data = f['observations/gelsight/depth_strain_image'][timestep, :, :, :]
-        gelsight_data = visualize_gelsight_data(gelsight_data)*255
-        grid[image_size[0]*2:, :gelsight_size[1], :] = gelsight_data
-        cv2.imshow('Images', grid)
-        cv2.waitKey(0)
-
-def test_confidence_score(all_image_vectors, all_gelsight_vectors, dataset_dir, episode_idx, episode_len):
-    for t in range(episode_len):
-        if t != 0:
-            print("confidence: ", np.dot(all_gelsight_vectors[t-1], all_gelsight_vectors[t])/np.linalg.norm(all_gelsight_vectors[t-1])/np.linalg.norm(all_gelsight_vectors[t]))
-        show_scene(f'{dataset_dir}/episode_{episode_idx}.hdf5', t)
-
 def plot_run_similarity(all_vectors, name):
+    """
+    Plots intra-run similarity matrix of the latent vectors
+    all_vectors: np.ndarray of shape (episode_len, 512). The latent vectors."""
     episode_len = all_vectors.shape[0]
     similarity = np.zeros((episode_len, episode_len))
     for i in range(episode_len):
         for j in range(episode_len):
-            similarity[i, j] = np.dot(all_vectors[i], all_vectors[j])/np.linalg.norm(all_vectors[i])/np.linalg.norm(all_vectors[j])
+            # cosine similarity
+            normalized_i = all_vectors[i]/np.linalg.norm(all_vectors[i])
+            normalized_j = all_vectors[j]/np.linalg.norm(all_vectors[j])
+            similarity[i, j] = np.dot(normalized_i, normalized_j)
+            
 
     plt.figure()
     plt.imshow(similarity, cmap='viridis')
@@ -88,80 +74,69 @@ def plot_run_similarity(all_vectors, name):
     plt.xlabel('Timestep')
     plt.ylabel('Timestep')
 
-    # differences_1 = np.zeros(episode_len)
-    # for i in range(1, episode_len):
-    #     differences_1[i] = 1 - (similarity[i-1, i])**4
-
-    # differences_5 = np.zeros(episode_len)
-    # for i in range(5, episode_len):
-    #     differences_5[i] = 1 - similarity[i-5, i]
-
-    # plt.figure()
-    # plt.plot(differences_1, label='1 timestep difference')
-    # # plt.plot(differences_5, label='5 timestep difference')
-    # plt.title('Difference in Similarity for ' + name)
-    
-
-
 
 if __name__ == "__main__":
-    image_encoder_path = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch_1499_vision_encoder.pth"
-    image_projection_head_path = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch_1499_vision_projection.pth"
-    gelsight_encoder_path = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch_1499_gelsight_encoder.pth"
-    gelsight_projection_head_path = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/11/epoch_1499_gelsight_projection.pth"
+    
+    # Control variables for the script
+    encoder_pretrained = True # whether to use the pre-trained encoders. If False, the encoders will be resnet18
+    projection_head_pretrained = True # whether to use the pre-trained projection heads. If False, the projection heads will be randomly initialized
+    use_projection_head = True # whether to use the projection head. If False, will compare the direct resnet18 encodings, not the clip encodings
+    use_act = False # whether to use the encoders fine-tuned with ACT
+
+    # clip model paths
+    image_encoder_path = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/normalized/4/epoch_1399_vision_encoder.pth"
+    image_projection_head_path = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/normalized/4/epoch_1399_vision_projection.pth"
+    gelsight_encoder_path = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/normalized/4/epoch_1399_gelsight_encoder.pth"
+    gelsight_projection_head_path = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/clip_models/normalized/4/epoch_1399_gelsight_projection.pth"
+
+    # ACT model path. Used if you want to examine the fine-tuned encoders
+    ACT_model_path = "/home/aigeorge/research/TactileACT/data/Final Trained Policies/Fixed/ACT/pretrain_both_20/policy_last.ckpt"
+    
     dataset_dir = "/home/aigeorge/research/TactileACT/data/camera_cage_new_mount/data"
-    num_episodes = 101
+    num_episodes = 100
 
-    # ACT_model_path = "/home/aigeorge/research/TactileACT/data/camera_cage/pretrained_1999_melted/policy_last.ckpt"
-    # image_encoder_path = "/home/aigeorge/research/TactileACT/clip_models/4/epoch_1999_vision_encoder.pth"
-    # image_projection_head_path = "/home/aigeorge/research/TactileACT/clip_models/4/epoch_1999_vision_projection.pth"
-    # gelsight_encoder_path = "/home/aigeorge/research/TactileACT/clip_models/4/epoch_1999_gelsight_encoder.pth"
-    # gelsight_projection_head_path = "/home/aigeorge/research/TactileACT/clip_models/4/epoch_1999_gelsight_projection.pth"
-    # dataset_dir = "/home/aigeorge/research/TactileACT/data/camera_cage/data"
-    # num_episodes = 39
-
+    # name of the cameras in the dataset
     camera_names = ["1", "2", "3", "4", "5", "6"]
-
-    encoder_pretrained = True
-    projection_head_pretrained = True
-    use_projection_head = True
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # create the vision encoder and projection head
-    vision_encoder = modified_resnet18().to(device)
-    if encoder_pretrained:
-        vision_encoder.load_state_dict(torch.load(image_encoder_path))
+    # create the vision and tactile encode
+    if use_act:
+        from load_ACT import load_ACT
+        act = load_ACT(ACT_model_path)
+        vision_encoder = act.model.backbones[0][0]
+        gelsight_encoder = act.model.backbones[1][0]
+        
+    else:
+        vision_encoder = modified_resnet18().to(device)
+        if encoder_pretrained:
+            vision_encoder.load_state_dict(torch.load(image_encoder_path, map_location=device))
 
-    # create the gelsight encoder and projection head
-    gelsight_encoder = modified_resnet18().to(device)
-    if encoder_pretrained:
-        gelsight_encoder.load_state_dict(torch.load(gelsight_encoder_path))
+        # create the gelsight encoder and projection head
+        gelsight_encoder = modified_resnet18().to(device)
+        if encoder_pretrained:
+            gelsight_encoder.load_state_dict(torch.load(gelsight_encoder_path, map_location=device))
 
-    vision_projection_head = ClipProjectionHead(512).to(device)
-    if projection_head_pretrained:
-        vision_projection_head.load_state_dict(torch.load(image_projection_head_path))
+    if use_projection_head:
+        vision_projection_head = ClipProjectionHead(512).to(device)
+        if projection_head_pretrained:
+            vision_projection_head.load_state_dict(torch.load(image_projection_head_path, map_location=device))
 
-    gelsight_projection_head = ClipProjectionHead(512, 3).to(device)
-    if  projection_head_pretrained:
-        gelsight_projection_head.load_state_dict(torch.load(gelsight_projection_head_path))
-
-    # ACT_model_path = "/home/aigeorge/research/TactileACT/data/camera_cage/pretrained_1999_melted/policy_last.ckpt"
-    # from load_ACT import load_ACT
-    # act = load_ACT(ACT_model_path)
-    # vision_encoder = act.model.backbones[0][0]
-    # gelsight_encoder = act.model.backbones[1][0]
+        gelsight_projection_head = ClipProjectionHead(512, 3).to(device)
+        # gelsight_projection_head = ClipProjectionHead(512).to(device)
+        if  projection_head_pretrained:
+            gelsight_projection_head.load_state_dict(torch.load(gelsight_projection_head_path, map_location=device))
 
     vision_encoder.eval()
-    vision_projection_head.eval()
     gelsight_encoder.eval()
-    gelsight_projection_head.eval()
+    if use_projection_head:
+        vision_projection_head.eval()
+        gelsight_projection_head.eval()
 
     norm_stats = get_norm_stats(dataset_dir, num_episodes, use_existing=True)
     dataset = ClipDataset(list(range(num_episodes)), dataset_dir, camera_names, norm_stats)
 
-    # episode_idxs = [0, 3] # 0 is training, 3 is testing
-    episode_idxs = [0]
+    episode_idxs = [0, 3] # 0 is training, 3 is testing
     for episode_idx in episode_idxs:
         episode_len = dataset.episode_lengths[episode_idx]
 
@@ -176,36 +151,46 @@ if __name__ == "__main__":
                 images = [dataset.get_image(episode_idx, t, cam) for cam in camera_names]
                 gelsight = dataset.get_gelsight(episode_idx, t)
                 position = dataset.get_position(episode_idx, t)
+                # position = torch.zeros_like(position).to(device)
 
+                # get the endodings and clip projections for the images
                 for i, image in enumerate(images):
                     encoding = vision_encoder(image.to(device).unsqueeze(0))
-                    image_vector = vision_projection_head(encoding)
-                    all_image_vectors[i, t, :] = image_vector.detach().cpu().numpy().squeeze()
-                    encoding = F.adaptive_avg_pool2d(encoding, (1, 1))
-                    all_image_encodings[i, t, :] = encoding.detach().cpu().numpy().squeeze()
+                    if use_projection_head:
+                        # get the encoding and pass through the projection head
+                        image_vector = vision_projection_head(encoding)
+                        all_image_vectors[i, t, :] = image_vector.detach().cpu().numpy().squeeze()
+                    else:
+                        # only save the encoding, passed through an average 
+                        # pooling layer (first layer of projection head)
+                        encoding = F.adaptive_avg_pool2d(encoding, (1, 1))
+                        all_image_encodings[i, t, :] = encoding.detach().cpu().numpy().squeeze()
 
+                # get the encoding and clip projection for the gelsight data
                 encoding = gelsight_encoder(gelsight.to(device).unsqueeze(0))
-                gelsight_vector = gelsight_projection_head(encoding, position.to(device).unsqueeze(0))
-                gelsight_vectors[t, :] = gelsight_vector.detach().cpu().numpy().squeeze()
-                encoding = F.adaptive_avg_pool2d(encoding, (1, 1))
-                gelsight_encodings[t, :] = encoding.detach().cpu().numpy().squeeze()
+                if use_projection_head:
+                    gelsight_vector = gelsight_projection_head(encoding, position.to(device).unsqueeze(0))
+                    gelsight_vectors[t, :] = gelsight_vector.detach().cpu().numpy().squeeze()
+                else:
+                    encoding = F.adaptive_avg_pool2d(encoding, (1, 1))
+                    gelsight_encodings[t, :] = encoding.detach().cpu().numpy().squeeze()
                 timestamps.append(t) # can be replaced with actual timestamps
 
         timestamps = np.array(timestamps)
+
+        # if not using the projection head, use the encodings
         if not use_projection_head:
             all_image_vectors = all_image_encodings
             gelsight_vectors = gelsight_encodings
 
+        # plot the similarity matrix for the latent vectors (intra-run similarity)
         plot_run_similarity(gelsight_vectors, 'Gelsight')
-        # plt.show()
-        # exit()
         for i, embedding in enumerate(all_image_vectors):
             plot_run_similarity(embedding, 'camera ' + str(i+1))
 
-        
+        # plot the t-SNE visualization of the latent vectors
         plot_tsne(all_image_vectors, gelsight_vectors, timestamps)
         plt.title(f't-SNE Visualization of Latent Vectors for Episode {episode_idx}')
-        # plt.show()
-        # test_confidence_score(all_image_vectors, gelsight_vectors, dataset_dir, episode_idx, episode_len)
+        plt.show()
         
     plt.show()
