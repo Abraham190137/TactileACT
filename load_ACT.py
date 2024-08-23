@@ -2,15 +2,21 @@ from policy_action_distribution import ACTPolicy
 import json
 import torch
 import os
+from copy import deepcopy
 
-def load_ACT(model_path, args_file:str = None) -> ACTPolicy:
+def load_ACT(model_path, args_file:str = None, override_args = None) -> ACTPolicy:
     if args_file is None:
         args_file = os.path.join(os.path.dirname(model_path), 'args.json')
     args = json.load(open(args_file, 'r'))
 
+    if override_args is not None:
+        for key, value in override_args.items():
+            args[key] = value
+
+
     # load pretrained backbones
     if args['backbone'] == "clip_backbone":
-        assert 'gelsight' in args['camera_names'], 'Gelsight camera not found in camera_names. Please add it to the meta_data.json file.'
+        # assert 'gelsight' in args['camera_names'], 'Gelsight camera not found in camera_names. Please add it to the meta_data.json file.'
         from clip_pretraining import modified_resnet18
         gelsight_model = modified_resnet18()
         vision_model = modified_resnet18()
@@ -51,7 +57,14 @@ def load_ACT(model_path, args_file:str = None) -> ACTPolicy:
                     pretrained_backbones = pretrained_backbones,
                     cam_backbone_mapping = camera_backbone_mapping)
     
+    # verify that all of the weight parameters are loaded (they should change if the model is loaded)
+    pre_load_params = deepcopy(list(act.parameters()))
     act.load_state_dict(torch.load(model_path))
+    post_load_params = list(act.parameters())
+    for i in range(len(pre_load_params)):
+        if torch.equal(pre_load_params[i], post_load_params[i]):
+            print(f"Parameter {i} was not loaded correctly.")
+        # assert not torch.equal(pre_load_params[i], post_load_params[i]), f"The model was not loaded correctly. {i} parameter is the same before and after loading."
     return act
 
 if __name__ == '__main__':

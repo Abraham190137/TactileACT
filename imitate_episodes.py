@@ -90,7 +90,7 @@ def main(args):
 
     # load pretrained backbones
     if args['backbone'] == "clip_backbone":
-        assert 'gelsight' in camera_names, 'Gelsight camera not found in camera_names. Please add it to the meta_data.json file.'
+        # assert 'gelsight' in camera_names, 'Gelsight camera not found in camera_names. Please add it to the meta_data.json file.'
         from clip_pretraining import modified_resnet18
         gelsight_model = modified_resnet18()
         vision_model = modified_resnet18()

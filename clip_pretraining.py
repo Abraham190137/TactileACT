@@ -77,7 +77,7 @@ class ClipProjectionHead(nn.Module):
 
 def modified_resnet18(weights=None, features_per_group=16) -> nn.Module:
     # get a resnet18 model
-    resnet18 = getattr(torchvision.models, 'resnet18')(weights=weights)
+    resnet18 = getattr(torchvision.models, 'resnet18')()
 
     # remove the final fully connected layer and average pooling
     resnet18 = nn.Sequential(*list(resnet18.children())[:-2])

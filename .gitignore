@@ -5,6 +5,7 @@ clip_graphs/
 clip_models/
 visualizations/
 *.h5py
+replay_data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
