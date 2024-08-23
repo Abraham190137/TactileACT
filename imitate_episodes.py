@@ -11,9 +11,7 @@ from einops import rearrange
 
 from utils import get_norm_stats, EpisodicDataset, EpisodicDatasetDelta # data functions
 from utils import compute_dict_mean, set_seed, detach_dict # helper functions
-from policy_action_distribution import ACTPolicy
-from policy_cnnmlp_distribution import CNNMLPPolicy
-from visualize_episodes import save_videos
+from policy import ACTPolicy
 from visualization_utils import visualize_data, debug
 
 from typing import List, Dict, Tuple, Any
@@ -26,7 +24,11 @@ import cv2
 
 from visualization_utils import visualise_trajectory, z_slider
 
+# Note about debug:
+# we used the global variable debug to trigger plotting in the training loop. This is a bit of a hack, but it works.
+
 DT = 0.01 # need to hardcode, used to be in constants.py
+FREEZE_TACTILE = True
 
 def main(args):
 
@@ -40,8 +42,6 @@ def main(args):
     num_epochs:int = args['num_epochs']
     chunk_size:int = args['chunk_size']
     kl_weight:float = args['kl_weight']
-    start_kl_epoch:int = args['start_kl_epoch']
-    kl_scale_epochs:int = args['kl_scale_epochs']
     hidden_dim:int = args['hidden_dim']
     dim_feedforward:int = args['dim_feedforward']
     lr:float = args['lr']
@@ -104,6 +104,9 @@ def main(args):
         elif args['gelsight_backbone_path'] != 'none' or args['vision_backbone_path'] != 'none':
             raise ValueError('Both vision and gelsight backbones must be specified if one is specified.')
         
+        if FREEZE_TACTILE:
+            gelsight_model.requires_grad_(False)
+            print("Freezing tactile backbone")
         pretrained_backbones = [vision_model, gelsight_model]
     else:
         if args['gelsight_backbone_path'] != 'none' or args['vision_backbone_path'] != 'none':
@@ -137,39 +140,14 @@ def main(args):
                            cam_backbone_mapping=camera_backbone_mapping
                            )
 
-    elif policy_class == 'CNNMLP':
-        policy = CNNMLPPolicy(state_dim=state_dim,
-                              hidden_dim=hidden_dim,
-                              lr_backbone=lr_backbone,
-                              masks=masks,
-                              backbone_type=backbone_type,
-                              dilation=dilation,
-                              camera_names=camera_names,
-                              lr=lr,
-                              weight_decay=weight_decay,
-                              )
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f'Policy class {policy_class} not implemented')
     
     policy.cuda()
     
 
     if is_eval:
-        import CustomEnv # TODO: change this to the real env
-        success_rate, avg_return = eval_bc(policy=policy,
-                                           ckpt_dir=ckpt_dir,
-                                           ckpt_name=ckpt_name,
-                                           policy_class=policy_class,
-                                           onscreen_render=onscreen_render,
-                                           temporal_agg=temporal_agg,
-                                           state_dim=state_dim,
-                                           chunk_size=chunk_size,
-                                           camera_names=camera_names,
-                                           save_episode=True,)
-                                        
-        print(f'{ckpt_name}: {success_rate=} {avg_return=}')
-        print()
-        exit()
+        raise NotImplementedError("We evaluated on hardware, not simulation. Please see robot_operation.py for the evaluation code. If you wish to evaluate in simulation, examine robot_operation.py or eval_bc() in the orgianl ACT")
 
     # If its not eval, then we are training. Make the ckpt_dir to save the model.
     if os.path.exists(ckpt_dir):
@@ -210,8 +188,8 @@ def main(args):
     # construct dataset and dataloader
     train_dataset = EpisodicDatasetDelta(train_indices, dataset_dir, camera_names, norm_stats, chunk_size=chunk_size)
     val_dataset = EpisodicDatasetDelta(val_indices, dataset_dir, camera_names, norm_stats, chunk_size=chunk_size)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=8, prefetch_factor=8)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=8, prefetch_factor=8)
 
     debug.action_qpos_normalizer = train_dataset.action_qpos_normalize
 
@@ -221,9 +199,6 @@ def main(args):
                               num_epochs=num_epochs,
                               ckpt_dir=ckpt_dir,
                               seed=seed,
-                              kl_weight=kl_weight,
-                              kl_scale_epochs=kl_scale_epochs,
-                              start_kl_epoch=start_kl_epoch,
                               )
                               
 
@@ -235,171 +210,6 @@ def main(args):
     print('checkpoint path', ckpt_path)
     print(f'Best ckpt, val loss {min_val_loss:.6f} @ epoch{best_epoch}')
 
-def get_image(obs, camera_names):
-    curr_images = []
-    for cam_name in camera_names:
-        curr_image = rearrange(obs['images'][cam_name], 'h w c -> c h w')
-        curr_images.append(curr_image)
-    curr_image = np.stack(curr_images, axis=0)
-    curr_image = torch.from_numpy(curr_image / 255.0).float().cuda().unsqueeze(0)
-    return curr_image
-
-
-def eval_bc(policy:ACTPolicy,
-            ckpt_dir:str,
-            ckpt_name:str,
-            policy_class:str,
-            onscreen_render:bool,
-            temporal_agg:bool,
-            state_dim: int,
-            chunk_size: int,
-            camera_names,
-            save_episode:bool = True
-            ):
-    
-    set_seed(1000)
-
-    # load policy and stats
-    ckpt_path = os.path.join(ckpt_dir, ckpt_name)
-    
-    # load weights
-    loading_status = policy.load_state_dict(torch.load(ckpt_path))
-    print(loading_status)
-    policy.eval()
-    print(f'Loaded: {ckpt_path}')
-    stats_path = os.path.join(ckpt_dir, f'dataset_stats.pkl')
-    with open(stats_path, 'rb') as f:
-        stats = pickle.load(f)
-
-    pre_process = lambda s_qpos: (s_qpos - stats['qpos_mean']) / stats['qpos_std']
-    post_process = lambda a: a * stats['action_std'] + stats['action_mean']
-
-    if onscreen_render:
-        cv2.namedWindow("plots", cv2.WINDOW_NORMAL)
-
-    # load environment
-    env = CustomEnv() # TODO: change this to the real env
-    
-    env_max_reward = env.MAX_REWARD
-
-    print("temporal_agg:", temporal_agg)
-
-    # query once per chunk 
-    query_frequency = chunk_size
-    print('query_frequency', query_frequency)
-    if temporal_agg:
-        query_frequency = 1
-        num_queries = chunk_size
-
-    max_timesteps = int(max_timesteps * 1) # may increase for real-world tasks
-
-    num_rollouts = 50
-    episode_returns = []
-    highest_rewards = []
-    for rollout_id in range(num_rollouts):
-        print(f'Rollout {rollout_id}')
-        rollout_id += 0
-        ### set task
-        obs = env.reset()
-        if onscreen_render:
-            cv2.imshow("plots", obs['images'][env.CAMERA_NAMES[0]])
-            cv2.waitKey(1)
-
-        ### evaluation loop
-        if temporal_agg:
-            all_time_actions = torch.zeros([max_timesteps, max_timesteps+num_queries, state_dim]).cuda()
-
-        qpos_history = torch.zeros((1, max_timesteps, state_dim)).cuda()
-        image_list = [] # for visualization
-        qpos_list = []
-        target_qpos_list = []
-        rewards = []
-        with torch.inference_mode():
-            for t in range(max_timesteps):
-                ### process previous timestep to get qpos and image_list
-                if 'images' in obs:
-                    image_list.append(obs['images'])
-                else:
-                    image_list.append({'main': obs['image']})
-                qpos_numpy = np.array(obs['qpos'])
-                qpos = pre_process(qpos_numpy)
-                qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
-                qpos_history[:, t] = qpos
-                curr_image = get_image(obs, camera_names)
-
-                if onscreen_render:
-                    cv2.imshow("plots", obs['images'][env.CAMERA_NAMES[0]])
-                    cv2.waitKey(int(DT*1000))
-
-                ### query policy
-                if policy_class == "ACT":
-                    if t % query_frequency == 0:
-                        all_actions = policy(qpos, curr_image)
-                    if temporal_agg:
-                        all_time_actions[[t], t:t+num_queries] = all_actions
-                        actions_for_curr_step = all_time_actions[:, t]
-                        actions_populated = torch.all(actions_for_curr_step != 0, axis=1)
-                        actions_for_curr_step = actions_for_curr_step[actions_populated]
-                        k = 0.01
-                        exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
-                        exp_weights = exp_weights / exp_weights.sum()
-                        exp_weights = torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
-                        # for i in range(len(actions_for_curr_step)):
-                        #     print('action', i, actions_for_curr_step[i])
-                        raw_action = (actions_for_curr_step * exp_weights).sum(dim=0, keepdim=True)
-                    else:
-                        raw_action = all_actions[:, t % query_frequency]
-                elif policy_class == "CNNMLP":
-                    raw_action = policy(qpos, curr_image)
-                else:
-                    raise NotImplementedError
-
-                ### post-process actions
-                raw_action = raw_action.squeeze(0).cpu().numpy()
-                action = post_process(raw_action)
-                target_qpos = action
-
-                ### step the environment
-                # print('target', target_qpos)
-                obs = env.step(target_qpos)
-
-                ### for visualization
-                qpos_list.append(qpos_numpy)
-                target_qpos_list.append(target_qpos)
-                rewards.append(obs['reward'])
-
-            plt.close()
-
-        rewards = np.array(rewards)
-        episode_return = np.sum(rewards[rewards!=None])
-        episode_returns.append(episode_return)
-        episode_highest_reward = np.max(rewards)
-        highest_rewards.append(episode_highest_reward)
-        print(f'Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward==env_max_reward}')
-
-        if save_episode:
-            save_videos(image_list, DT, video_path=os.path.join(ckpt_dir, f'video{rollout_id}.mp4'))
-
-    success_rate = np.mean(np.array(highest_rewards) == env_max_reward)
-    avg_return = np.mean(episode_returns)
-    summary_str = f'\nSuccess rate: {success_rate}\nAverage return: {avg_return}\n\n'
-    for r in range(env_max_reward+1):
-        more_or_equal_r = (np.array(highest_rewards) >= r).sum()
-        more_or_equal_r_rate = more_or_equal_r / num_rollouts
-        summary_str += f'Reward >= {r}: {more_or_equal_r}/{num_rollouts} = {more_or_equal_r_rate*100}%\n'
-
-    print(summary_str)
-
-    # save success rate to txt
-    result_file_name = 'result_' + ckpt_name.split('.')[0] + '.txt'
-    with open(os.path.join(ckpt_dir, result_file_name), 'w') as f:
-        f.write(summary_str)
-        f.write(repr(episode_returns))
-        f.write('\n\n')
-        f.write(repr(highest_rewards))
-
-    return success_rate, avg_return
-
 
 def train_bc(policy:ACTPolicy,
              train_dataloader: DataLoader,
@@ -407,9 +217,6 @@ def train_bc(policy:ACTPolicy,
              num_epochs: int,
              ckpt_dir: str,
              seed: int,
-             kl_weight: float,
-             kl_scale_epochs: int,
-             start_kl_epoch: int,
              ):
     
     # policy.cuda()
@@ -426,16 +233,10 @@ def train_bc(policy:ACTPolicy,
             policy.eval()
             epoch_dicts = []
             for batch_idx, data in enumerate(val_dataloader):
-                # print("epoch:", epoch, " batch:", batch_idx)
-                # print("data 0:", data[0].shape, data[0].dtype)
-                # print("data 1:", data[1].shape, data[1].dtype)
-                # print("data 2:", data[2].shape, data[2].dtype)
-                # print("data 3:", data[3].shape, data[3].dtype)
                 # forward pass
                 image_data, qpos_data, action_data, is_pad = data
-                # visualize_data(image_data, qpos_data, action_data, is_pad)
 
-                # image_data, qpos_data, action_data, is_pad = image_data.cuda(), qpos_data.cuda(), action_data.cuda(), is_pad.cuda()
+                # plot the first batch of every plot_freq epochs
                 if batch_idx == 0 and epoch%plot_freq == 0:
                     debug.plot = True
                     debug.print = False
@@ -472,11 +273,6 @@ def train_bc(policy:ACTPolicy,
         policy.train()
         policy.optimizer.zero_grad()
         for batch_idx, data in enumerate(train_dataloader):
-            # update kl_weight
-            if kl_scale_epochs > 0:
-                policy.kl_weight = np.clip((epoch - start_kl_epoch) / kl_scale_epochs, 0, 1)*kl_weight
-            else:
-                policy.kl_weight = np.clip((epoch - start_kl_epoch), 0, 1)*kl_weight
 
             image_data, qpos_data, action_data, is_pad = data
             if batch_idx == 0 and epoch%plot_freq == 0:
@@ -498,8 +294,6 @@ def train_bc(policy:ACTPolicy,
             
             # backward
             loss = forward_dict['loss']
-            # kl_weight = np.clip((epoch - policy_config['start_kl_epoch']) / policy_config['kl_scale_epochs'], 0, 1)*policy_config['kl_weight']
-            # loss = forward_dict['l1'] + forward_dict['kl'] * kl_weight
             loss.backward()
             policy.optimizer.step()
             policy.optimizer.zero_grad()
@@ -547,7 +341,6 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
         val_values = [summary[key].item() for summary in validation_history]
         plt.plot(np.linspace(1, num_epochs-1, len(train_history)), train_values, label='train') # skip the first epoch
         plt.plot(np.linspace(1, num_epochs-1, len(validation_history)), val_values, label='validation')
-        # plt.ylim([-0.1, 1])
         plt.tight_layout()
         plt.legend()
         plt.title(key)
@@ -582,8 +375,6 @@ if __name__ == '__main__':
             "num_epochs": int,
             "lr": float,
             "kl_weight": float,
-            "start_kl_epoch": int,
-            "kl_scale_epochs": int,
             "chunk_size": int,
             "hidden_dim": int,
             "dim_feedforward": int,
@@ -656,8 +447,6 @@ if __name__ == '__main__':
 
     # for ACT
     parser.add_argument('--kl_weight', action='store', type=float, help='KL Weight', required=False)
-    parser.add_argument('--start_kl_epoch', action='store', type=int, help='start_kl_epoch', required=False, default=0)
-    parser.add_argument('--kl_scale_epochs', action='store', type=int, help='number of epochs to scale KL over', required=False, default=0)
     parser.add_argument('--chunk_size', action='store', type=int, help='chunk_size', required=False)
     parser.add_argument('--hidden_dim', action='store', type=int, help="Size of the embeddings (dimension of the transformer)", required=False)
     parser.add_argument('--dim_feedforward', action='store', type=int, default=2048, help="Intermediate size of the feedforward layers in the transformer blocks", required=False)

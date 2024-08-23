@@ -5,6 +5,7 @@ clip_graphs/
 clip_models/
 visualizations/
 *.h5py
+untracked_helper_scripts/
 replay_data/
 
 # Byte-compiled / optimized / DLL files

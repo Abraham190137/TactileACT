@@ -49,40 +49,26 @@ class Transformer(nn.Module):
                 # nn.init.trunc_normal_(p, mean=0.0, std=0.02)
 
     def forward(self, src, mask, query_embed, pos_embed, latent_input=None, proprio_input=None, additional_pos_embed=None, debug=False, tgt=None):
-        # TODO flatten only when input has H and W
-        # print('using the right code')
         # flatten NxCxHxW to HWxNxC
         bs, c, _ = src.shape
         src = src.permute(2, 0, 1)
         pos_embed = pos_embed.permute(2, 0, 1).repeat(1, bs, 1)
         query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
-        # mask = mask.flatten(1)
 
         additional_pos_embed = additional_pos_embed.unsqueeze(1).repeat(1, bs, 1) # seq, bs, dim
         pos_embed = torch.cat([additional_pos_embed, pos_embed], axis=0)
         if debug:
             print('additional embedding shape', additional_pos_embed.shape)
-            # print('additional embedding embedding 0', additional_pos_embed[0, 0, :])
-            # print('additional embedding embedding 1', additional_pos_embed[1, 0, :])
             print('query_embed shape', query_embed.shape)
             plt.figure()
             plt.imshow(query_embed[:, 0, :].detach().cpu().numpy())
             plt.title('query_embed')
-            # plt.show()
-
-            # print('query_embed 0', query_embed[0, 0, :])
-            # print('query_embed 1', query_embed[1, 0, :])
-            
-            # I want to verify that the model is actualy being updated durring training,
-            # so I will print out the first 10 weights of the first layer of the model
-            # print('first 10 weights of the first layer of the model', self.encoder.layers[0].self_attn.in_proj_weight[0:10])
             
         addition_input = torch.stack([latent_input, proprio_input], axis=0)
         if debug:
             print('addition_input shape', addition_input.shape)
         src = torch.cat([addition_input, src], axis=0)
 
-        # print(f'tgt should be {query_embed.shape} but is {tgt.shape}')
         if tgt is None:
             tgt = torch.zeros_like(query_embed)
 

@@ -38,107 +38,6 @@ class DebugController:
 
 debug = DebugController()
 
-def visualise_trajectory(env_img, trajectory, title='Trajectory'):
-    image_bgr = cv2.cvtColor(env_img, cv2.COLOR_RGB2BGR)
-
-    # Draw circles for each point in the trajectory
-    for point in trajectory:
-        point = tuple((point * np.array(image_bgr.shape[:2])).astype(int))
-        cv2.circle(image_bgr, tuple(point), radius=5, color=(0, 255, 255), thickness=1)
-
-    # Display the image using OpenCV
-    cv2.imshow('Environment with Trajectory', image_bgr)
-    cv2.waitKey(1)
-
-
-def z_slider(policy, post_process, qpos, image, processed_image, z_min=-3, z_max=3):
-    from matplotlib.widgets import Button, Slider
-    from scipy.stats import norm
-    keep_going = [True]
-
-    # Create a figure with subplots
-    fig, axs = plt.subplots(1, 2, figsize=(12, 6))
-    ax = axs[0]  # Main plot
-    ax2 = axs[1]  # Second plot
-    ax.set_xlabel('Time [s]')
-    ax2.set_xlabel('Time [s]')
-
-    ax.imshow(image)
-    ax2.imshow(image)
-
-    # Generate percentiles for the z samples
-    quantiles = np.linspace(0.05, 0.95, 20)
-
-    # Use the percent-point function (ppf) to get the corresponding values from the standard normal distribution
-    z_values = norm.ppf(quantiles, loc=0, scale=1)
-
-    for z_value in z_values:
-        # Choose a color for the trajectory based on z using the colormap
-        color = plt.cm.plasma((z_value - min(z_values)) / (max(z_values) - min(z_values)))
-
-        all_actions = policy(qpos, processed_image, z=z_value)
-        trajectory = post_process(all_actions.detach().squeeze(0).cpu().numpy())
-        ax2.scatter(trajectory[:, 0] * image.shape[0],
-                    trajectory[:, 1] * image.shape[1],
-                    facecolors='none', edgecolors=color, marker='o')
-
-    all_actions = policy(qpos, processed_image)
-    trajectory = post_process(all_actions.detach().squeeze(0).cpu().numpy())
-    points = ax.scatter(trajectory[:, 0] * image.shape[0],
-                        trajectory[:, 1] * image.shape[1],
-                        facecolors='none', edgecolors='green', marker='o')
-
-    ax2.scatter(trajectory[:, 0] * image.shape[0],
-                trajectory[:, 1] * image.shape[1],
-                facecolors='none', edgecolors='green', marker='o')
-
-    # Adjust the main plot to make room for the sliders
-    fig.subplots_adjust(left=0.25, bottom=0.25)
-
-    # Make a horizontal slider to control z.
-    slider_ax = fig.add_axes([0.1, 0.25, 0.0225, 0.63])
-    freq_slider = Slider(
-        ax=slider_ax,
-        label='z',
-        valmin=z_min,
-        valmax=z_max,
-        valinit=0,
-        orientation='vertical'
-    )
-
-    # The function to be called anytime a slider's value changes
-    def update(z):
-        all_actions = policy(qpos, processed_image, z=z)
-        trajectory = post_process(all_actions.detach().squeeze(0).cpu().numpy())
-        points.set_offsets(trajectory * image.shape[0])
-        fig.canvas.draw_idle()
-        print("z:", z)
-
-    # Register the update function with each slider
-    freq_slider.on_changed(update)
-
-    # Create a `matplotlib.widgets.Button` to move onto the next rollout
-    resetax = fig.add_axes([0.8, 0.025, 0.125, 0.04])
-    next_button = Button(resetax, 'Next Env', hovercolor='0.975')
-
-    # Create a button to move onto the next step
-    resetax2 = fig.add_axes([0.8, 0.075, 0.125, 0.04])
-    continue_button = Button(resetax2, 'Continue', hovercolor='0.975')
-
-    def next_step(event):
-        plt.close(fig)
-
-    continue_button.on_clicked(next_step)
-
-    def next_rollout(event):
-        plt.close(fig)
-        keep_going[0] = False
-
-    next_button.on_clicked(next_rollout)
-
-    plt.show()
-    return keep_going[0]
-
 def visualize_data(image_data, qpos_data, action_pred_data, is_pad_data, action_gt_data=None):
     global debug
     if not debug.plot:
@@ -163,9 +62,14 @@ def visualize_data(image_data, qpos_data, action_pred_data, is_pad_data, action_
     fig = plt.figure(figsize=(10, 10), layout='tight')
     subfigs = fig.subfigures(1, 2, wspace=0.07)
 
-    axs_left = subfigs[0].subplots(len(images), 1)
-    for i, image in enumerate(images):
-        axs_left[i].imshow(image.transpose(1, 2, 0))     
+    if len(images) > 1:
+        axs_left = subfigs[0].subplots(len(images), 1)
+        for i, image in enumerate(images):
+            axs_left[i].imshow(image.transpose(1, 2, 0))     
+    elif len(images) == 1:
+        subfigs[0].add_subplot(111).imshow(images[0].transpose(1, 2, 0))
+    else:
+        pass
 
     # Make a 3D scatter plot of the actions in the right subplot. Use cmaps to color the points based on the index
     c = np.arange(len(actions_pred))
