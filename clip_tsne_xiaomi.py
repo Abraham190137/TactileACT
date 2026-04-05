@@ -101,21 +101,21 @@ def plot_run_similarity(all_vectors, name):
 # -------------------------- 核心配置（已填你的路径） --------------------------
 if __name__ == "__main__":
     # ====================== 1. 你的本地配置（已填） ======================
-    SAVE_DIR = "/home/chenshuai/data/dataset/bounce/clip_models/loop2"
-    DATASET_DIR = "/home/chenshuai/data/dataset/bounce"
-    START_EPISODE = 90          
-    NUM_EPISODES = 89           
+    SAVE_DIR = "/home/chenshuai/Project/output/xiaomi"
+    DATASET_DIR = "/home/chenshuai/data/dataset/260309_0310"
+    START_EPISODE = 0         
+    NUM_EPISODES = 337        
     CAMERA_NAMES = "global,wrist"
     TAC_SIDE = "left"           
     TAC_KEY = "img"             
     PROPRIO_KEY = "proprio_eef" 
     CLIP_DIM = 512              
     FEATURES_PER_GROUP = 16     
-    EPISODE_IDXS = [0, 3]
-    EPOCH = 1499  # 手动指定epoch编号，设为None则自动选最新的
+    EPISODE_IDXS = [20,23]
+    EPOCH = 99 #动指定epoch编号，设为None则自动选最新的
 
     # ====================== 2. 固定配置 ======================
-    encoder_pretrained = True
+    encoder_pretrained = True   
     projection_head_pretrained = True
     use_projection_head = True
     use_act = False  

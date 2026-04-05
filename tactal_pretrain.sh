@@ -1,0 +1,14 @@
+python clip_pretraining_bounce.py \
+  --dataset_dir /home/chenshuai/data/dataset/bounce \
+  --save_dir /home/chenshuai/Project/output/0309_0310\
+  --start_episode 90 \
+  --num_episodes 89 \
+  --camera_names global,wrist \
+  --tac_side left \
+  --tac_key img \
+  --proprio_key proprio_eef \
+  --batch_size 24 \
+  --n_clip_images 12 \
+  --min_distance 15 \
+  --n_epochs 2000 \
+  --save_freq 100   

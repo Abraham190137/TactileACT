@@ -40,6 +40,37 @@ class NormalizeActionQpos:
         new_action = action * self.std + self.mean
         return new_qpos, new_action
     
+class NormalizeSeparate:
+    """Normalize qpos and action with their own mean/std (like miACT)."""
+    def __init__(self, norm_stats):
+        self.qpos_mean = norm_stats["qpos_mean"]
+        self.qpos_std = norm_stats["qpos_std"]
+        self.action_mean = norm_stats["action_mean"]
+        self.action_std = norm_stats["action_std"]
+
+    def __call__(self, qpos, action):
+        qpos = (qpos - self.qpos_mean) / self.qpos_std
+        action = (action - self.action_mean) / self.action_std
+        return qpos, action
+
+    def normalize_qpos(self, qpos):
+        return (qpos - self.qpos_mean) / self.qpos_std
+
+    def normalize_action(self, action):
+        return (action - self.action_mean) / self.action_std
+
+    def unnormalize_qpos(self, qpos):
+        return qpos * self.qpos_std + self.qpos_mean
+
+    def unnormalize_action(self, action):
+        return action * self.action_std + self.action_mean
+
+    def unnormalize(self, qpos, action):
+        new_qpos = qpos * self.qpos_std + self.qpos_mean
+        new_action = action * self.action_std + self.action_mean
+        return new_qpos, new_action
+
+
 class NormalizeDeltaActionQpos:
     def __init__(self, norm_stats):
         self.qpos_mean = norm_stats["qpos_mean"]
@@ -73,13 +104,18 @@ class NormalizeDeltaActionQpos:
         return qpos, action
 
 class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, chunk_size, image_size = None):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, chunk_size, image_size = None,
+                 proprio_key="qpos", action_key="action", tac_side="left", tac_img_key="img"):
         super(EpisodicDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
+        self.proprio_key = proprio_key  # HDF5 key under /observations/
+        self.action_key = action_key    # HDF5 key (e.g. "action" or "actions/joint_abs")
+        self.tac_side = tac_side        # "left" or "right"
+        self.tac_img_key = tac_img_key  # "img" or "depth"
 
-        self.action_qpos_normalize = NormalizeActionQpos(norm_stats)
+        self.action_qpos_normalize = NormalizeSeparate(norm_stats)
 
         self.is_sim = None
         self.image_size = image_size # image size in (H, W)
@@ -89,7 +125,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
         self.chunk_size = chunk_size
 
-        # image normalization for resnet. 
+        # image normalization for resnet.
         self.image_normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
         self.__getitem__(0) # initialize self.is_sim, self.image_size
@@ -106,34 +142,50 @@ class EpisodicDataset(torch.utils.data.Dataset):
         episode_id = self.episode_ids[index]
         dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_id}.hdf5')
         with h5py.File(dataset_path, 'r') as root:
-            is_sim = root.attrs['sim']
-            original_action_shape = root['/action'].shape
+            is_sim = root.attrs.get('sim', False)
+            # Support both flat "/action" and nested "actions/joint_abs" keys
+            action_dataset = root[f'/{self.action_key}'] if self.action_key.startswith('actions/') else root[f'/{self.action_key}']
+            original_action_shape = action_dataset.shape
             episode_len = original_action_shape[0]
             if sample_full_episode:
                 start_ts = 0
             else:
                 start_ts = np.random.choice(episode_len)
             # get observation at start_ts only
-            qpos = root['/observations/qpos'][start_ts]
-            # qvel = root['/observations/qvel'][start_ts] # unused
+            qpos = root[f'/observations/{self.proprio_key}'][start_ts]
 
             if self.image_size is None: # if image size is not specified, use the saved image size
-                self.image_size = (root.attrs['image_height'], root.attrs['image_width'])
+                if 'image_height' in root.attrs:
+                    self.image_size = (root.attrs['image_height'], root.attrs['image_width'])
+                else:
+                    # infer from first camera image
+                    first_cam = [c for c in self.camera_names if c not in ('gelsight', 'blank')][0]
+                    img_shape = root[f'/observations/images/{first_cam}'].shape
+                    self.image_size = (img_shape[1], img_shape[2])
 
             all_cam_images = []
 
             for cam_name in self.camera_names:
-                # seperate processing for gelsight:
+                # seperate processing for gelsight (tactile):
                 if cam_name == 'gelsight':
-                    size = (root.attrs['gelsight_height'], root.attrs['gelsight_width'])
-                    gelsight_data = root['observations/gelsight/depth_strain_image'][start_ts]
-                    # gelsight_data = cv2.resize(gelsight_data, (self.image_size[1], self.image_size[0]))
-                    # adjust gelsight data using the mean and std
-                    gelsight_data = (gelsight_data - self.gelsight_mean) / self.gelsight_std
-                    gelsight_data = torch.tensor(gelsight_data, dtype=torch.float32)
-                    gelsight_data = torch.einsum('h w c -> c h w', gelsight_data) # change to c h w
-                    all_cam_images.append(gelsight_data)
-                
+                    # Try new tac format first, fallback to legacy gelsight format
+                    tac_path = f'observations/tac/{self.tac_side}/{self.tac_img_key}'
+                    if tac_path in root:
+                        tac_data = root[tac_path][start_ts]
+                        tac_data = torch.tensor(tac_data, dtype=torch.float32) / 255.0
+                        tac_data = torch.einsum('h w c -> c h w', tac_data)
+                        tac_data = self.image_normalize(tac_data)
+                        all_cam_images.append(tac_data)
+                    elif 'observations/gelsight/depth_strain_image' in root:
+                        # Legacy format
+                        gelsight_data = root['observations/gelsight/depth_strain_image'][start_ts]
+                        gelsight_data = (gelsight_data - self.gelsight_mean) / self.gelsight_std
+                        gelsight_data = torch.tensor(gelsight_data, dtype=torch.float32)
+                        gelsight_data = torch.einsum('h w c -> c h w', gelsight_data)
+                        all_cam_images.append(gelsight_data)
+                    else:
+                        raise KeyError(f"No tactile data found at '{tac_path}' or legacy gelsight path")
+
                 elif cam_name == "blank":
                     image = np.zeros((self.image_size[0], self.image_size[1], 3), dtype=np.float32)
                     image = torch.tensor(image, dtype=torch.float32)
@@ -157,8 +209,8 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
 
             # get all actions after and including start_ts, with the max length of chunk_size
-            action_len = min(episode_len - start_ts, self.chunk_size) 
-            action = root['/action'][start_ts:start_ts + action_len]
+            action_len = min(episode_len - start_ts, self.chunk_size)
+            action = action_dataset[start_ts:start_ts + action_len]
 
         # normalize action and qpos
         qpos, action = self.action_qpos_normalize(qpos=qpos, action=action)
@@ -205,7 +257,8 @@ def gelsight_norm_stats(dataset_dir, num_episodes) -> tuple:
     return gelsight_mean, gelsight_std
 
 
-def get_norm_stats(dataset_dir, num_episodes, use_existing=True, chunk_size = 0):
+def get_norm_stats(dataset_dir, num_episodes, use_existing=True, chunk_size=0,
+                   proprio_key="qpos", action_key="action"):
     qpos_data_list = []
     action_data_list = []
     use_gelsight = False
@@ -213,11 +266,10 @@ def get_norm_stats(dataset_dir, num_episodes, use_existing=True, chunk_size = 0)
     for episode_idx in tqdm(range(num_episodes), desc="Get Norm Stats"):
         dataset_path = os.path.join(dataset_dir, f'episode_{episode_idx}.hdf5')
         with h5py.File(dataset_path, 'r') as root:
-            qpos = root['/observations/qpos'][()]
-            #qvel = root['/observations/qvel'][()] # unused
-            action = root['/action'][()]
+            qpos = root[f'/observations/{proprio_key}'][()]
+            action = root[f'/{action_key}'][()]
 
-            # if gelsight data exists, get the average
+            # check for gelsight data (legacy format)
             if 'observations/gelsight/depth_strain_image' in root:
                 use_gelsight = True
 
@@ -239,7 +291,7 @@ def get_norm_stats(dataset_dir, num_episodes, use_existing=True, chunk_size = 0)
     stats = {"action_mean": action_mean, "action_std": action_std,
             "qpos_mean": qpos_mean, "qpos_std": qpos_std}
 
-    # check to see if norm stats already exists
+    # check to see if norm stats already exists (legacy gelsight)
     if use_gelsight:
         if use_existing and os.path.exists(os.path.join(dataset_dir, 'gelsight_norm_stats.json')):
             with open(os.path.join(dataset_dir, 'gelsight_norm_stats.json'), 'r') as f:
@@ -267,7 +319,7 @@ def get_norm_stats(dataset_dir, num_episodes, use_existing=True, chunk_size = 0)
         delta_std = np.clip(delta_std, 1e-3, np.inf)
         stats["delta_mean"] = np.concatenate([delta_mean, [action_mean[3]]])
         stats["delta_std"] = np.concatenate([delta_std, [action_std[3]]])
-            
+
     return stats
 
 

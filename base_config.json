@@ -29,6 +29,7 @@
     "nheads": 8,
     "pre_norm": false,
     "masks": false,
-    "gelsight_backbone_path": "none",
+    "gelsight_backbone_path": "none", 
+    
     "vision_backbone_path": "none"
 }

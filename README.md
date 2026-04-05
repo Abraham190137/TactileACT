@@ -42,4 +42,3 @@ python imitate_episodes.py --config base_config.json --save_dir data/data_dir --
 As the paper is under review, this repo is still under development and may change, and the code may not be fully documented.
 If you have any questions on the repo, or want any advise on using visuo-tacitle pretraining for your own project, please do not hesitate to reach out to aigeorge@andrew.cmu.edu.
 Enjoy!
-

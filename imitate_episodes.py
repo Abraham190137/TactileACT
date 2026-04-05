@@ -22,8 +22,6 @@ e = IPython.embed
 
 import cv2
 
-from visualization_utils import visualise_trajectory, z_slider
-
 # Note about debug:
 # we used the global variable debug to trigger plotting in the training loop. This is a bit of a hack, but it works.
 
@@ -78,8 +76,13 @@ def main(args):
     camera_names: List[str] = meta_data['camera_names']
     is_sim: bool = meta_data['is_sim']
     state_dim:int = meta_data['state_dim']
+    proprio_key: str = meta_data.get('proprio_key', 'qpos')
+    action_key: str = meta_data.get('action_key', 'action')
+    tac_side: str = meta_data.get('tac_side', 'left')
+    tac_img_key: str = meta_data.get('tac_img_key', 'img')
 
-    norm_stats = get_norm_stats(dataset_dir, num_episodes, chunk_size=chunk_size)
+    norm_stats = get_norm_stats(dataset_dir, num_episodes, chunk_size=0,
+                                proprio_key=proprio_key, action_key=action_key)
 
     # save norm stats to args. Need to convert from numpy to list
     args['norm_stats'] = {k: v.tolist() for k, v in norm_stats.items()}
@@ -91,7 +94,10 @@ def main(args):
     # load pretrained backbones
     if args['backbone'] == "clip_backbone":
         # assert 'gelsight' in camera_names, 'Gelsight camera not found in camera_names. Please add it to the meta_data.json file.'
-        from clip_pretraining import modified_resnet18
+        try:
+            from clip_pretraining_xiaomi import modified_resnet18
+        except ImportError:
+            from clip_pretraining import modified_resnet18
         gelsight_model = modified_resnet18()
         vision_model = modified_resnet18()
         camera_backbone_mapping = {cam_name: 0 for cam_name in camera_names}
@@ -186,8 +192,12 @@ def main(args):
         pickle.dump(norm_stats, f)
 
     # construct dataset and dataloader
-    train_dataset = EpisodicDatasetDelta(train_indices, dataset_dir, camera_names, norm_stats, chunk_size=chunk_size)
-    val_dataset = EpisodicDatasetDelta(val_indices, dataset_dir, camera_names, norm_stats, chunk_size=chunk_size)
+    dataset_kwargs = dict(proprio_key=proprio_key, action_key=action_key,
+                          tac_side=tac_side, tac_img_key=tac_img_key)
+    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats,
+                                    chunk_size=chunk_size, **dataset_kwargs)
+    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats,
+                                  chunk_size=chunk_size, **dataset_kwargs)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=8, prefetch_factor=8)
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=8, prefetch_factor=8)
 
